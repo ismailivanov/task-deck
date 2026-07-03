@@ -209,6 +209,11 @@ class BoardView extends ItemView {
     element.draggable = !isRenaming;
     element.dataset.cardId = card.id;
     if (card.completed) element.classList.add("is-completed");
+    if (card.completed && this.plugin.completedAnimationCardId === card.id) {
+      element.classList.add("is-just-completed");
+      this.plugin.completedAnimationCardId = null;
+      window.setTimeout(() => element.classList.remove("is-just-completed"), 650);
+    }
 
     element.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("text/plain", card.id);

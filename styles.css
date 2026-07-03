@@ -130,6 +130,7 @@
   background: var(--background-primary);
   box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
   cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
 .ot-card:hover {
@@ -146,6 +147,10 @@
 
 .ot-card.is-completed .ot-card-title {
   color: var(--text-muted);
+}
+
+.ot-card.is-just-completed {
+  animation: ot-complete-card-pulse 560ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .ot-card-labels {
@@ -263,6 +268,10 @@
   color: #1f2328;
 }
 
+.ot-card.is-just-completed .ot-card-complete-toggle {
+  animation: ot-complete-toggle-pop 420ms cubic-bezier(0.2, 0.9, 0.2, 1.2);
+}
+
 .ot-card-complete-mark {
   display: flex;
   align-items: center;
@@ -272,6 +281,93 @@
   font-size: 19px;
   font-weight: 900;
   line-height: 1;
+}
+
+.ot-card.is-just-completed .ot-card-complete-mark {
+  animation: ot-complete-check-pop 420ms cubic-bezier(0.2, 0.9, 0.2, 1.2);
+}
+
+.ot-card.is-just-completed .ot-card-title {
+  animation: ot-complete-title-settle 520ms ease;
+}
+
+@keyframes ot-complete-card-pulse {
+  0% {
+    border-color: var(--background-modifier-border);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+    transform: translateY(0);
+  }
+
+  38% {
+    border-color: #8cc63f;
+    box-shadow: 0 0 0 3px rgb(140 198 63 / 22%), 0 8px 18px rgb(0 0 0 / 22%);
+    transform: translateY(-2px);
+  }
+
+  100% {
+    border-color: var(--background-modifier-border);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+    transform: translateY(0);
+  }
+}
+
+@keyframes ot-complete-toggle-pop {
+  0% {
+    transform: translateY(-50%) scale(0.72);
+  }
+
+  58% {
+    transform: translateY(-50%) scale(1.18);
+  }
+
+  100% {
+    transform: translateY(-50%) scale(1);
+  }
+}
+
+@keyframes ot-complete-check-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4) rotate(-18deg);
+  }
+
+  62% {
+    opacity: 1;
+    transform: scale(1.18) rotate(5deg);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0);
+  }
+}
+
+@keyframes ot-complete-title-settle {
+  0% {
+    color: var(--text-normal);
+    transform: translateX(0);
+  }
+
+  45% {
+    color: var(--text-normal);
+    transform: translateX(3px);
+  }
+
+  100% {
+    color: var(--text-muted);
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ot-card,
+  .ot-card.is-just-completed,
+  .ot-card.is-just-completed .ot-card-complete-toggle,
+  .ot-card.is-just-completed .ot-card-complete-mark,
+  .ot-card.is-just-completed .ot-card-title {
+    animation: none;
+    transition: none;
+  }
 }
 
 .ot-card-composer {
