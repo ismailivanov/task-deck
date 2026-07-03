@@ -9,13 +9,13 @@ const CARD_FOLDER = "Kanban Cards";
 const BOARD_INDEX_FILE = "Task Deck Board.md";
 const TASK_DECK_ICON = "task-deck";
 const TASK_DECK_ICON_SVG = `
-  <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="3.5" y="4" width="5" height="16" rx="1.4" />
-    <rect x="9.5" y="4" width="5" height="12" rx="1.4" />
-    <rect x="15.5" y="4" width="5" height="9" rx="1.4" />
-    <path d="M5.2 7h1.6" />
-    <path d="M11.2 7h1.6" />
-    <path d="M17.2 7h1.6" />
+  <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="14" y="16" width="20" height="68" rx="6" />
+    <rect x="40" y="16" width="20" height="52" rx="6" />
+    <rect x="66" y="16" width="20" height="38" rx="6" />
+    <path d="M21 31h6" />
+    <path d="M47 31h6" />
+    <path d="M73 31h6" />
   </g>
 `;
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
