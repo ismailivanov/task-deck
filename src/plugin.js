@@ -399,7 +399,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const card = this.data.cards[cardId];
     if (!card) return;
     const completed = !card.completed;
-    if (completed && this.data.completionSound) this.playCompletionSound();
+    if (completed) {
+      this.completedAnimationCardId = cardId;
+      if (this.data.completionSound) this.playCompletionSound();
+    } else if (this.completedAnimationCardId === cardId) {
+      this.completedAnimationCardId = null;
+    }
     await this.updateCard(cardId, { completed });
   }
 

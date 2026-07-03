@@ -1435,6 +1435,11 @@ class BoardView extends ItemView {
     element.draggable = !isRenaming;
     element.dataset.cardId = card.id;
     if (card.completed) element.classList.add("is-completed");
+    if (card.completed && this.plugin.completedAnimationCardId === card.id) {
+      element.classList.add("is-just-completed");
+      this.plugin.completedAnimationCardId = null;
+      window.setTimeout(() => element.classList.remove("is-just-completed"), 650);
+    }
 
     element.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("text/plain", card.id);
@@ -1703,7 +1708,7 @@ class TaskDeckSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc(this.plugin.manifest.version || "0.1.6");
+      .setDesc(this.plugin.manifest.version || "0.1.7");
   }
 }
 
@@ -2112,7 +2117,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const card = this.data.cards[cardId];
     if (!card) return;
     const completed = !card.completed;
-    if (completed && this.data.completionSound) this.playCompletionSound();
+    if (completed) {
+      this.completedAnimationCardId = cardId;
+      if (this.data.completionSound) this.playCompletionSound();
+    } else if (this.completedAnimationCardId === cardId) {
+      this.completedAnimationCardId = null;
+    }
     await this.updateCard(cardId, { completed });
   }
 
