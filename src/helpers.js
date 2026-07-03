@@ -3,6 +3,7 @@ const { setIcon } = require("obsidian");
 // Shared constants plus small pure helpers for dates, labels, Markdown, and DOM controls.
 const VIEW_TYPE = "task-deck-view";
 const CARD_FOLDER = "Kanban Cards";
+const BOARD_INDEX_FILE = "Task Deck Board.md";
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
 const DONATION_URL = "https://buymeacoffee.com/carbon06";
 const DEFAULT_LABEL_COLOR = "#2f6fd6";
@@ -296,6 +297,7 @@ function parseCardMarkdown(markdown) {
 module.exports = {
   VIEW_TYPE,
   CARD_FOLDER,
+  BOARD_INDEX_FILE,
   LIST_DRAG_TYPE,
   DONATION_URL,
   DEFAULT_LABEL_COLOR,
