@@ -60,7 +60,7 @@ class TaskDeckSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc(this.plugin.manifest.version || "0.1.3");
+      .setDesc(this.plugin.manifest.version || "0.1.4");
   }
 }
 

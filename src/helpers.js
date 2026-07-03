@@ -123,7 +123,8 @@ function labelKey(label) {
 
 function cleanLabelName(label) {
   const name = textLine(typeof label === "string" ? label : label && label.name);
-  return name === "---" ? "" : name;
+  if (name === "---" || /^(kanban-card-id|kanban-board-id|kanban-list-id|completed|start|due):/i.test(name)) return "";
+  return name;
 }
 
 /**
@@ -274,6 +275,11 @@ function labelsToFrontmatter(labels) {
     .join(", ");
 }
 
+function frontmatterValue(markdown, key) {
+  const match = markdown.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
+  return match ? textLine(match[1]) : null;
+}
+
 /**
  * Parses a Task Deck card note into the in-memory card fields.
  *
@@ -282,24 +288,21 @@ function labelsToFrontmatter(labels) {
  * keep existing saved values when appropriate.
  */
 function parseCardMarkdown(markdown) {
-  const idMatch = markdown.match(/^kanban-card-id:\s*(.*)$/m);
-  const boardMatch = markdown.match(/^kanban-board-id:\s*(.*)$/m);
-  const listMatch = markdown.match(/^kanban-list-id:\s*(.*)$/m);
   const titleMatch = markdown.match(/^#\s+(.+)$/m);
-  const labelsMatch = markdown.match(/^labels:\s*(.*)$/m);
-  const completedMatch = markdown.match(/^completed:\s*(.*)$/m);
-  const startMatch = markdown.match(/^start:\s*(.*)$/m);
-  const dueMatch = markdown.match(/^due:\s*(.*)$/m);
+  const labels = frontmatterValue(markdown, "labels");
+  const completed = frontmatterValue(markdown, "completed");
+  const start = frontmatterValue(markdown, "start");
+  const due = frontmatterValue(markdown, "due");
 
   return {
-    id: idMatch ? textLine(idMatch[1]) : "",
-    boardId: boardMatch ? textLine(boardMatch[1]) : "",
-    listId: listMatch ? textLine(listMatch[1]) : "",
+    id: frontmatterValue(markdown, "kanban-card-id") || "",
+    boardId: frontmatterValue(markdown, "kanban-board-id") || "",
+    listId: frontmatterValue(markdown, "kanban-list-id") || "",
     title: titleMatch ? titleMatch[1].trim() : "",
-    labels: labelsMatch ? parseLabels(labelsMatch[1]) : [],
-    completed: completedMatch ? parseBoolean(completedMatch[1]) : null,
-    startDate: startMatch ? cleanDate(startMatch[1]) : null,
-    dueDate: dueMatch ? cleanDate(dueMatch[1]) : null,
+    labels: labels !== null ? parseLabels(labels) : [],
+    completed: completed !== null ? parseBoolean(completed) : null,
+    startDate: start !== null ? cleanDate(start) : null,
+    dueDate: due !== null ? cleanDate(due) : null,
     details: getSectionAny(markdown, ["Details", "Detaylar"]),
     checklist: parseChecklist(getSectionAny(markdown, ["Checklist", "Yapılacaklar", "Kontrol listesi"])),
   };

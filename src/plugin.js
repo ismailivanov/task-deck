@@ -76,6 +76,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.cards = this.data.cards || {};
     this.data.labels = this.data.labels || [];
     this.data.activeBoardId = this.data.activeBoardId || this.data.boards[0].id;
+    this.data.labels = this.normalizeGlobalLabels(this.data.labels);
     Object.values(this.data.cards).forEach((card) => {
       card.labels = this.normalizeCardLabels(card.labels || []);
       card.completed = !!card.completed;
