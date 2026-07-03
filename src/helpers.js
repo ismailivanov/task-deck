@@ -115,18 +115,17 @@ function cleanLabelName(label) {
 }
 
 /**
- * Builds a vault-safe card filename from a title.
+ * Builds a readable vault-safe card filename from a title.
  */
-function slugify(value) {
-  const slug = String(value || "card")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
+function cardFileBaseName(value) {
+  const name = textLine(value || "Card")
+    .replace(/[\\/:*?"<>|#^[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .trim()
+    .slice(0, 80);
 
-  return slug || "card";
+  return name || "Card";
 }
 
 function createElement(tag, className, text) {
@@ -315,7 +314,7 @@ module.exports = {
   parseBoolean,
   labelKey,
   cleanLabelName,
-  slugify,
+  cardFileBaseName,
   createElement,
   hasDragType,
   iconButton,

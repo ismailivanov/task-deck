@@ -12,7 +12,7 @@ const {
   labelKey,
   labelsToFrontmatter,
   parseCardMarkdown,
-  slugify,
+  cardFileBaseName,
   textLine,
   uid,
 } = require("./helpers");
@@ -78,7 +78,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       card.startDate = cleanDate(card.startDate);
       card.dueDate = cleanDate(card.dueDate);
     });
+    const renamed = await this.normalizeCardFilePaths();
     await this.syncCardsFromFolder();
+    if (renamed) await this.savePluginData();
   }
 
   async savePluginData() {
@@ -207,6 +209,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         filePath: file.path,
         updatedAt: card.updatedAt || now,
       });
+      if (await this.normalizeCardFilePath(card)) changed = true;
 
       if (!this.data.cards[card.id]) {
         this.data.cards[card.id] = card;
@@ -451,14 +454,36 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async nextCardPath(title, currentPath) {
     await this.ensureCardFolder();
 
-    const base = slugify(title);
+    const base = cardFileBaseName(title);
     let path = `${CARD_FOLDER}/${base}.md`;
     let index = 2;
     while (path !== currentPath && this.app.vault.getAbstractFileByPath(path)) {
-      path = `${CARD_FOLDER}/${base}-${index}.md`;
+      path = `${CARD_FOLDER}/${base} ${index}.md`;
       index += 1;
     }
     return path;
+  }
+
+  async normalizeCardFilePaths() {
+    let changed = false;
+    for (const card of Object.values(this.data.cards)) {
+      if (await this.normalizeCardFilePath(card)) changed = true;
+    }
+    return changed;
+  }
+
+  async normalizeCardFilePath(card) {
+    if (!card || !card.title || !card.filePath) return false;
+
+    const nextPath = await this.nextCardPath(card.title, card.filePath);
+    if (nextPath === card.filePath) return false;
+
+    const file = this.app.vault.getAbstractFileByPath(card.filePath);
+    if (!file || file.extension !== "md") return false;
+
+    await this.app.vault.rename(file, nextPath);
+    card.filePath = nextPath;
+    return true;
   }
 
   async renameCardFile(card, title) {

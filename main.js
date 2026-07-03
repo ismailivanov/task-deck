@@ -118,18 +118,17 @@ function cleanLabelName(label) {
 }
 
 /**
- * Builds a vault-safe card filename from a title.
+ * Builds a readable vault-safe card filename from a title.
  */
-function slugify(value) {
-  const slug = String(value || "card")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
+function cardFileBaseName(value) {
+  const name = textLine(value || "Card")
+    .replace(/[\\/:*?"<>|#^[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .trim()
+    .slice(0, 80);
 
-  return slug || "card";
+  return name || "Card";
 }
 
 function createElement(tag, className, text) {
@@ -318,7 +317,7 @@ module.exports = {
   parseBoolean,
   labelKey,
   cleanLabelName,
-  slugify,
+  cardFileBaseName,
   createElement,
   hasDragType,
   iconButton,
@@ -1666,7 +1665,7 @@ class TaskDeckSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc(this.plugin.manifest.version || "0.1.1");
+      .setDesc(this.plugin.manifest.version || "0.1.2");
   }
 }
 
@@ -1688,7 +1687,7 @@ const {
   labelKey,
   labelsToFrontmatter,
   parseCardMarkdown,
-  slugify,
+  cardFileBaseName,
   textLine,
   uid,
 } = __require("src/helpers.js");
@@ -1754,7 +1753,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       card.startDate = cleanDate(card.startDate);
       card.dueDate = cleanDate(card.dueDate);
     });
+    const renamed = await this.normalizeCardFilePaths();
     await this.syncCardsFromFolder();
+    if (renamed) await this.savePluginData();
   }
 
   async savePluginData() {
@@ -1883,6 +1884,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         filePath: file.path,
         updatedAt: card.updatedAt || now,
       });
+      if (await this.normalizeCardFilePath(card)) changed = true;
 
       if (!this.data.cards[card.id]) {
         this.data.cards[card.id] = card;
@@ -2127,14 +2129,36 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async nextCardPath(title, currentPath) {
     await this.ensureCardFolder();
 
-    const base = slugify(title);
+    const base = cardFileBaseName(title);
     let path = `${CARD_FOLDER}/${base}.md`;
     let index = 2;
     while (path !== currentPath && this.app.vault.getAbstractFileByPath(path)) {
-      path = `${CARD_FOLDER}/${base}-${index}.md`;
+      path = `${CARD_FOLDER}/${base} ${index}.md`;
       index += 1;
     }
     return path;
+  }
+
+  async normalizeCardFilePaths() {
+    let changed = false;
+    for (const card of Object.values(this.data.cards)) {
+      if (await this.normalizeCardFilePath(card)) changed = true;
+    }
+    return changed;
+  }
+
+  async normalizeCardFilePath(card) {
+    if (!card || !card.title || !card.filePath) return false;
+
+    const nextPath = await this.nextCardPath(card.title, card.filePath);
+    if (nextPath === card.filePath) return false;
+
+    const file = this.app.vault.getAbstractFileByPath(card.filePath);
+    if (!file || file.extension !== "md") return false;
+
+    await this.app.vault.rename(file, nextPath);
+    card.filePath = nextPath;
+    return true;
   }
 
   async renameCardFile(card, title) {
