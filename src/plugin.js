@@ -76,6 +76,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.cards = this.data.cards || {};
     this.data.labels = this.data.labels || [];
     this.data.activeBoardId = this.data.activeBoardId || this.data.boards[0].id;
+    this.data.completionSound = this.data.completionSound !== false;
     this.data.labels = this.normalizeGlobalLabels(this.data.labels);
     Object.values(this.data.cards).forEach((card) => {
       card.labels = this.normalizeCardLabels(card.labels || []);
@@ -396,7 +397,45 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async toggleCardCompleted(cardId) {
     const card = this.data.cards[cardId];
     if (!card) return;
-    await this.updateCard(cardId, { completed: !card.completed });
+    const completed = !card.completed;
+    if (completed && this.data.completionSound) this.playCompletionSound();
+    await this.updateCard(cardId, { completed });
+  }
+
+  playCompletionSound() {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+
+      this.completionAudioContext = this.completionAudioContext || new AudioContext();
+      const audio = this.completionAudioContext;
+      const play = () => {
+        const now = audio.currentTime;
+        const gain = audio.createGain();
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.08, now + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+        gain.connect(audio.destination);
+
+        [660, 880].forEach((frequency, index) => {
+          const oscillator = audio.createOscillator();
+          oscillator.type = "sine";
+          oscillator.frequency.setValueAtTime(frequency, now + index * 0.07);
+          oscillator.connect(gain);
+          oscillator.start(now + index * 0.07);
+          oscillator.stop(now + index * 0.18);
+        });
+        window.setTimeout(() => gain.disconnect(), 350);
+      };
+
+      if (audio.state === "suspended") {
+        audio.resume().then(play).catch(() => {});
+      } else {
+        play();
+      }
+    } catch (error) {
+      // Sound is a small optional cue; completion should never fail because of it.
+    }
   }
 
   /**

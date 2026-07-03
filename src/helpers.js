@@ -37,6 +37,7 @@ const LABEL_COLORS = [
 const DEFAULT_DATA = {
   version: 1,
   activeBoardId: "default",
+  completionSound: true,
   boards: [
     {
       id: "default",

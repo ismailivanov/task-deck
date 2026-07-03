@@ -50,6 +50,18 @@ class TaskDeckSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Completion sound")
+      .setDesc("Play a short sound when a card is marked complete.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.data.completionSound !== false)
+          .onChange(async (value) => {
+            this.plugin.data.completionSound = value;
+            await this.plugin.savePluginData();
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Support development")
       .setDesc("Open the donation page.")
       .addButton((button) => {
@@ -60,7 +72,7 @@ class TaskDeckSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc(this.plugin.manifest.version || "0.1.4");
+      .setDesc(this.plugin.manifest.version || "0.1.5");
   }
 }
 
