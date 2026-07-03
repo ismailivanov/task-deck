@@ -1,0 +1,3 @@
+const COMPLETION_SOUND_URL = "__TASK_DECK_COMPLETION_SOUND__";
+
+module.exports = { COMPLETION_SOUND_URL };

@@ -11,6 +11,7 @@ const ROOT = __dirname;
 const ENTRY = "src/plugin.js";
 const OUTFILE = "main.js";
 const EXTERNALS = new Set(["obsidian"]);
+const COMPLETION_SOUND_TOKEN = "__TASK_DECK_COMPLETION_SOUND__";
 
 const modules = new Map();
 
@@ -29,6 +30,10 @@ function collect(filePath) {
   if (modules.has(id)) return id;
 
   let code = fs.readFileSync(filePath, "utf8");
+  if (code.includes(COMPLETION_SOUND_TOKEN)) {
+    const sound = fs.readFileSync(path.join(ROOT, "bink.wav")).toString("base64");
+    code = code.replace(COMPLETION_SOUND_TOKEN, `data:audio/wav;base64,${sound}`);
+  }
   code = code.replace(/require\("([^"]+)"\)/g, (match, request) => {
     if (!request.startsWith(".") || EXTERNALS.has(request)) return match;
     return `__require("${collect(resolveRelative(filePath, request))}")`;

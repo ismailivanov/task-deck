@@ -20,6 +20,7 @@ const {
   uid,
 } = require("./helpers");
 const { BoardView } = require("./board-view");
+const { COMPLETION_SOUND_URL } = require("./completion-sound");
 const { TextPromptModal } = require("./modals");
 const { TaskDeckSettingTab } = require("./settings-tab");
 
@@ -404,35 +405,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   playCompletionSound() {
     try {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContext) return;
-
-      this.completionAudioContext = this.completionAudioContext || new AudioContext();
-      const audio = this.completionAudioContext;
-      const play = () => {
-        const now = audio.currentTime;
-        const gain = audio.createGain();
-        gain.gain.setValueAtTime(0.0001, now);
-        gain.gain.exponentialRampToValueAtTime(0.08, now + 0.015);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-        gain.connect(audio.destination);
-
-        [660, 880].forEach((frequency, index) => {
-          const oscillator = audio.createOscillator();
-          oscillator.type = "sine";
-          oscillator.frequency.setValueAtTime(frequency, now + index * 0.07);
-          oscillator.connect(gain);
-          oscillator.start(now + index * 0.07);
-          oscillator.stop(now + index * 0.18);
-        });
-        window.setTimeout(() => gain.disconnect(), 350);
-      };
-
-      if (audio.state === "suspended") {
-        audio.resume().then(play).catch(() => {});
-      } else {
-        play();
-      }
+      const audio = new Audio(COMPLETION_SOUND_URL);
+      audio.volume = 0.6;
+      const play = audio.play();
+      if (play && play.catch) play.catch(() => {});
     } catch (error) {
       // Sound is a small optional cue; completion should never fail because of it.
     }
