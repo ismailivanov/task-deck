@@ -4,6 +4,7 @@ const { ItemView, Menu, setIcon } = require("obsidian");
 const {
   DONATION_URL,
   LIST_DRAG_TYPE,
+  TASK_DECK_ICON,
   VIEW_TYPE,
   checklistStats,
   createElement,
@@ -38,7 +39,7 @@ class BoardView extends ItemView {
   }
 
   getIcon() {
-    return "layout-dashboard";
+    return TASK_DECK_ICON;
   }
 
   async onOpen() {

@@ -1,10 +1,12 @@
-const { Notice, Plugin } = require("obsidian");
+const { Notice, Plugin, addIcon } = require("obsidian");
 
 // Owns the Obsidian plugin lifecycle, saved board data, and Markdown card sync.
 const {
   BOARD_INDEX_FILE,
   CARD_FOLDER,
   DEFAULT_DATA,
+  TASK_DECK_ICON,
+  TASK_DECK_ICON_SVG,
   VIEW_TYPE,
   checklistToMarkdown,
   cleanDate,
@@ -32,13 +34,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async onload() {
     await this.loadPluginData();
 
+    addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
     ["create", "modify", "rename"].forEach((eventName) => {
       this.registerEvent(this.app.vault.on(eventName, (file) => this.queueCardFolderSync(file)));
     });
 
-    this.addRibbonIcon("layout-dashboard", "Open Task Deck", () => this.activateView());
+    this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
     this.addCommand({
       id: "open-board",
       name: "Open board",
