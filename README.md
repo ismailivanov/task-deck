@@ -4,7 +4,11 @@ Task Deck is a small kanban board for Obsidian. It keeps the board simple, but e
 
 I built it for tracking tasks without leaving Obsidian: lists, cards, labels, dates, and checklists in one view.
 
-Screenshots will be added later.
+<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/6bfa709d-2cf8-4900-a274-9e95927541b4" />
+
+<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/bf7a2472-60bd-4ce4-81da-d30f92c2bc57" />
+
+<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/90bdd068-7040-4367-bfa0-58ef921b24bc" />
 
 ## Support
 
