@@ -7,6 +7,17 @@ const { setIcon } = require("obsidian");
 const VIEW_TYPE = "task-deck-view";
 const CARD_FOLDER = "Kanban Cards";
 const BOARD_INDEX_FILE = "Task Deck Board.md";
+const TASK_DECK_ICON = "task-deck";
+const TASK_DECK_ICON_SVG = `
+  <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3.5" y="4" width="5" height="16" rx="1.4" />
+    <rect x="9.5" y="4" width="5" height="12" rx="1.4" />
+    <rect x="15.5" y="4" width="5" height="9" rx="1.4" />
+    <path d="M5.2 7h1.6" />
+    <path d="M11.2 7h1.6" />
+    <path d="M17.2 7h1.6" />
+  </g>
+`;
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
 const DONATION_URL = "https://buymeacoffee.com/carbon06";
 const DEFAULT_LABEL_COLOR = "#2f6fd6";
@@ -301,6 +312,8 @@ module.exports = {
   VIEW_TYPE,
   CARD_FOLDER,
   BOARD_INDEX_FILE,
+  TASK_DECK_ICON,
+  TASK_DECK_ICON_SVG,
   LIST_DRAG_TYPE,
   DONATION_URL,
   DEFAULT_LABEL_COLOR,
@@ -1213,6 +1226,7 @@ const { ItemView, Menu, setIcon } = require("obsidian");
 const {
   DONATION_URL,
   LIST_DRAG_TYPE,
+  TASK_DECK_ICON,
   VIEW_TYPE,
   checklistStats,
   createElement,
@@ -1247,7 +1261,7 @@ class BoardView extends ItemView {
   }
 
   getIcon() {
-    return "layout-dashboard";
+    return TASK_DECK_ICON;
   }
 
   async onOpen() {
@@ -1675,13 +1689,15 @@ module.exports = { TaskDeckSettingTab };
 
   },
   "src/plugin.js": function(module, exports, __require) {
-const { Notice, Plugin } = require("obsidian");
+const { Notice, Plugin, addIcon } = require("obsidian");
 
 // Owns the Obsidian plugin lifecycle, saved board data, and Markdown card sync.
 const {
   BOARD_INDEX_FILE,
   CARD_FOLDER,
   DEFAULT_DATA,
+  TASK_DECK_ICON,
+  TASK_DECK_ICON_SVG,
   VIEW_TYPE,
   checklistToMarkdown,
   cleanDate,
@@ -1709,13 +1725,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async onload() {
     await this.loadPluginData();
 
+    addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
     ["create", "modify", "rename"].forEach((eventName) => {
       this.registerEvent(this.app.vault.on(eventName, (file) => this.queueCardFolderSync(file)));
     });
 
-    this.addRibbonIcon("layout-dashboard", "Open Task Deck", () => this.activateView());
+    this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
     this.addCommand({
       id: "open-board",
       name: "Open board",

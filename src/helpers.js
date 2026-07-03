@@ -4,6 +4,17 @@ const { setIcon } = require("obsidian");
 const VIEW_TYPE = "task-deck-view";
 const CARD_FOLDER = "Kanban Cards";
 const BOARD_INDEX_FILE = "Task Deck Board.md";
+const TASK_DECK_ICON = "task-deck";
+const TASK_DECK_ICON_SVG = `
+  <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3.5" y="4" width="5" height="16" rx="1.4" />
+    <rect x="9.5" y="4" width="5" height="12" rx="1.4" />
+    <rect x="15.5" y="4" width="5" height="9" rx="1.4" />
+    <path d="M5.2 7h1.6" />
+    <path d="M11.2 7h1.6" />
+    <path d="M17.2 7h1.6" />
+  </g>
+`;
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
 const DONATION_URL = "https://buymeacoffee.com/carbon06";
 const DEFAULT_LABEL_COLOR = "#2f6fd6";
@@ -298,6 +309,8 @@ module.exports = {
   VIEW_TYPE,
   CARD_FOLDER,
   BOARD_INDEX_FILE,
+  TASK_DECK_ICON,
+  TASK_DECK_ICON_SVG,
   LIST_DRAG_TYPE,
   DONATION_URL,
   DEFAULT_LABEL_COLOR,
