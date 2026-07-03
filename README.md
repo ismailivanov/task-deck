@@ -35,7 +35,7 @@ https://buymeacoffee.com/carbon06
 
 ## Usage
 
-- Run `Open Task Deck` from the command palette.
+- Run `Open board` from the command palette.
 - Use `Add list` to create a new list.
 - Use `Add card` under a list, then type the card name inline.
 - Click a card to edit labels, details, dates, and checklist items.
@@ -59,7 +59,7 @@ Obsidian loads the generated `main.js` file.
 Download the release files and place them here:
 
 ```text
-Your Vault/.obsidian/plugins/obsidian-tasks-kanban/
+Your Vault/.obsidian/plugins/task-deck/
 ```
 
 Then enable **Task Deck** from Obsidian's Community plugins settings.

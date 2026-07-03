@@ -39,12 +39,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     this.addRibbonIcon("layout-dashboard", "Open Task Deck", () => this.activateView());
     this.addCommand({
-      id: "open-kanban-board",
-      name: "Open Task Deck",
+      id: "open-board",
+      name: "Open board",
       callback: () => this.activateView(),
     });
     this.addCommand({
-      id: "quick-add-kanban-card",
+      id: "add-card-to-first-list",
       name: "Add card to first list",
       callback: async () => {
         const firstList = this.getBoard().lists[0];
