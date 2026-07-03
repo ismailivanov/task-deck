@@ -1,5 +1,11 @@
 # Task Deck
 
+[![Obsidian](https://img.shields.io/badge/Obsidian-1.5%2B-7c3aed?logo=obsidian&logoColor=white)](https://obsidian.md)
+[![Release](https://img.shields.io/github/v/release/ismailivanov/task-deck?label=release)](https://github.com/ismailivanov/task-deck/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-f1c40f.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-README-0ea5e9.svg)](README.md)
+[![Support](https://img.shields.io/badge/support-Buy%20Me%20a%20Coffee-ffdd00.svg)](https://buymeacoffee.com/carbon06)
+
 Task Deck is a small kanban board for Obsidian. It keeps the board simple, but every card is still a real Markdown note in your vault.
 
 I built it for tracking tasks without leaving Obsidian: lists, cards, labels, dates, and checklists in one view.
