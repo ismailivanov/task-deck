@@ -1,7 +1,7 @@
 const { Notice, PluginSettingTab, Setting } = require("obsidian");
 
 // Settings tab for board access, card-note sync, support, and version info.
-const { CARD_FOLDER, DONATION_URL } = require("./helpers");
+const { DONATION_URL, RELAY_URL } = require("./helpers");
 
 /**
  * Obsidian settings tab for Task Deck.
@@ -23,8 +23,8 @@ class TaskDeckSettingTab extends PluginSettingTab {
     });
 
     new Setting(containerEl)
-      .setName("Card folder")
-      .setDesc(`Cards are stored as Markdown notes in ${CARD_FOLDER}/.`);
+      .setName("Board folders")
+      .setDesc("Each board stores its Markdown cards in a folder named after that board.");
 
     new Setting(containerEl)
       .setName("Open board")
@@ -50,6 +50,15 @@ class TaskDeckSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Realtime collaboration")
+      .setDesc("Use Relay by sharing the Task Deck board folders you want to collaborate on.")
+      .addButton((button) => {
+        button
+          .setButtonText("Open Relay")
+          .onClick(() => window.open(RELAY_URL, "_blank"));
+      });
+
+    new Setting(containerEl)
       .setName("Completion sound")
       .setDesc("Play a short sound when a card is marked complete.")
       .addToggle((toggle) => {
@@ -72,7 +81,7 @@ class TaskDeckSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc(this.plugin.manifest.version || "0.1.7");
+      .setDesc(this.plugin.manifest.version || "0.1.8");
   }
 }
 
