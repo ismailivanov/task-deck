@@ -4,6 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/ismailivanov/task-deck?label=release)](https://github.com/ismailivanov/task-deck/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f1c40f.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-README-0ea5e9.svg)](README.md)
+[![Relay ready](https://img.shields.io/badge/realtime-Relay%20ready-22c55e.svg)](https://community.obsidian.md/plugins/system3-relay)
 [![Support](https://img.shields.io/badge/support-Buy%20Me%20a%20Coffee-ffdd00.svg)](https://buymeacoffee.com/carbon06)
 
 Task Deck is a small kanban board for Obsidian. It keeps the board simple, but every card is still a real Markdown note in your vault.
@@ -25,24 +26,40 @@ https://buymeacoffee.com/carbon06
 ## Features
 
 - Kanban lists with drag-and-drop ordering
-- Cards stored as Markdown notes under `Kanban Cards/`
+- Create as many boards as you need
+- Each board stores cards as Markdown notes in its own board folder
 - Inline card creation and renaming
 - Global colored labels
 - Start and due dates with a compact date picker
 - Checklist progress on cards
 - Card details rendered as Markdown
 - Automatic sync for cards created outside the board
+- Relay-friendly board folders for realtime collaboration
 
 ## Usage
 
 - Run `Open board` from the command palette.
+- Create a board with the name you want to use.
+- Switch between boards from the board picker or the boards screen.
 - Use `Add list` to create a new list.
 - Use `Add card` under a list, then type the card name inline.
 - Click a card to edit labels, details, dates, and checklist items.
 - Use `Open note` when you want to work with the card as a normal Markdown file.
 - Drag cards between lists and drag list headers to reorder columns.
 
-If you create a Markdown card directly inside `Kanban Cards/`, Task Deck will pick it up and show it on the board.
+If you create a Markdown card directly inside a board folder, Task Deck will pick it up and show it on that board.
+
+## Realtime collaboration
+
+Task Deck works well with [Relay](https://community.obsidian.md/plugins/system3-relay) because boards and cards are stored as normal Markdown files in your vault.
+
+To collaborate:
+
+- Install Task Deck and Relay on each collaborator's Obsidian.
+- In Relay, share the Task Deck board folder you want to work on.
+- Open Task Deck on the other device and run **Sync now** from settings if the board does not appear immediately.
+
+Task Deck does not run its own sync server. Relay handles realtime updates, while Task Deck keeps cards and board index files readable as Markdown.
 
 ## Development
 

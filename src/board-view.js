@@ -6,6 +6,7 @@ const {
   LIST_DRAG_TYPE,
   TASK_DECK_ICON,
   VIEW_TYPE,
+  addButtonIcon,
   checklistStats,
   createElement,
   dateRangeLabel,
@@ -14,7 +15,7 @@ const {
   textButton,
   textLine,
 } = require("./helpers");
-const { AboutModal, CardDatesModal, CardModal } = require("./modals");
+const { AboutModal, CardDatesModal, CardModal, ListColorModal } = require("./modals");
 
 /**
  * Obsidian view for the task board.
@@ -28,6 +29,7 @@ class BoardView extends ItemView {
     this.plugin = plugin;
     this.addingCardListId = null;
     this.editingCardId = null;
+    this.showingBoardHome = false;
   }
 
   getViewType() {
@@ -50,11 +52,25 @@ class BoardView extends ItemView {
     const board = this.plugin.getBoard();
     this.contentEl.replaceChildren();
     this.contentEl.addClass("ot-board-root");
+    this.contentEl.classList.toggle("is-compact-labels", !!this.plugin.data.compactLabels);
+
+    if (!board || this.showingBoardHome) {
+      this.renderBoardHome();
+      return;
+    }
 
     const toolbar = createElement("div", "ot-toolbar");
-    toolbar.append(createElement("h2", "", board.name));
+    const title = createElement("div", "ot-toolbar-title");
+    title.append(iconButton("layout-dashboard", "Boards", () => {
+      this.showingBoardHome = true;
+      this.render();
+    }));
+    title.append(createElement("h2", "", board.name));
+    if (this.plugin.data.boards.length > 1) title.append(this.renderBoardSelect(board));
+    toolbar.append(title);
     const actions = createElement("div", "ot-toolbar-actions");
     actions.append(
+      textButton("plus-square", "New board", () => this.plugin.createBoardPrompt()),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
       textButton("plus", "Add list", () => this.plugin.addList())
@@ -67,12 +83,75 @@ class BoardView extends ItemView {
     this.contentEl.append(toolbar, scroller);
   }
 
+  renderBoardHome() {
+    const welcome = createElement("section", "ot-welcome-panel");
+    const welcomeCopy = createElement("div", "ot-welcome-copy");
+    welcomeCopy.append(
+      createElement("h2", "", this.plugin.data.boards.length ? "Your boards" : "Create your first board"),
+      createElement("p", "", "Create focused kanban boards and keep every card as a Markdown note in your vault.")
+    );
+    const welcomeActions = createElement("div", "ot-welcome-actions");
+    welcomeActions.append(
+      textButton("plus", "Create board", () => this.plugin.createBoardPrompt()),
+      textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
+      textButton("heart", "Support developer", () => window.open(DONATION_URL, "_blank"))
+    );
+    welcome.append(welcomeCopy, welcomeActions);
+
+    const boards = createElement("div", "ot-board-home");
+    if (!this.plugin.data.boards.length) {
+      const empty = createElement("div", "ot-empty-board-home");
+      empty.append(
+        createElement("h3", "", "No boards yet"),
+        createElement("p", "", "Start with a project, sprint, content plan, or anything else you want to track.")
+      );
+      boards.append(empty);
+    } else {
+      this.plugin.data.boards.forEach((board) => boards.append(this.renderBoardTile(board)));
+    }
+
+    this.contentEl.append(welcome, boards);
+  }
+
+  renderBoardSelect(activeBoard) {
+    const select = createElement("select", "ot-board-select");
+    this.plugin.data.boards.forEach((board) => {
+      const option = createElement("option", "", board.name);
+      option.value = board.id;
+      option.selected = board.id === activeBoard.id;
+      select.append(option);
+    });
+    select.addEventListener("change", async () => {
+      this.showingBoardHome = false;
+      await this.plugin.setActiveBoard(select.value);
+    });
+    return select;
+  }
+
+  renderBoardTile(board) {
+    const tile = createElement("button", "ot-board-tile");
+    tile.type = "button";
+    const cardCount = board.lists.reduce((total, list) => total + list.cardIds.length, 0);
+    tile.append(createElement("span", "ot-board-tile-title", board.name));
+    tile.append(createElement("span", "ot-board-tile-meta", `${board.lists.length} lists / ${cardCount} cards`));
+    tile.addEventListener("click", async () => {
+      this.showingBoardHome = false;
+      await this.plugin.setActiveBoard(board.id);
+    });
+
+    const menuButton = iconButton("ellipsis", "Board menu", (event) => this.showBoardMenu(event, board));
+    menuButton.classList.add("ot-board-tile-menu");
+    tile.append(menuButton);
+    return tile;
+  }
+
   /**
    * Renders one column and wires list-level drag/drop targets.
    */
   renderList(list) {
     const column = createElement("section", "ot-list");
     column.dataset.listId = list.id;
+    if (list.color) column.style.setProperty("--ot-list-color", list.color);
     const clearListDropState = () => {
       column.classList.remove("is-list-drop-before", "is-list-drop-after");
     };
@@ -97,7 +176,9 @@ class BoardView extends ItemView {
       dragHandle.textContent = "";
     }
 
-    header.append(dragHandle, createElement("h3", "", list.title));
+    const colorDot = createElement("span", "ot-list-color-dot");
+    if (list.color) colorDot.style.backgroundColor = list.color;
+    header.append(dragHandle, colorDot, createElement("h3", "", list.title));
     header.append(createElement("span", "ot-list-count", String(list.cardIds.length)));
     header.append(iconButton("ellipsis", "List menu", (event) => this.showListMenu(event, list)));
 
@@ -144,7 +225,7 @@ class BoardView extends ItemView {
 
     list.cardIds.forEach((cardId) => {
       const card = this.plugin.data.cards[cardId];
-      if (card) cards.append(this.renderCard(card, list.id));
+      if (card) cards.append(this.renderCard(card, list));
     });
 
     const footer = createElement("div", "ot-list-footer");
@@ -175,6 +256,7 @@ class BoardView extends ItemView {
 
     const actions = createElement("div", "ot-card-composer-actions");
     const add = createElement("button", "mod-cta", "Add");
+    addButtonIcon(add, "plus");
     const cancel = iconButton("x", "Cancel", () => this.hideCardComposer());
     add.type = "submit";
     actions.append(add, cancel);
@@ -203,7 +285,7 @@ class BoardView extends ItemView {
    * Renders one card, including drag/drop, completion toggle, rename trigger,
    * and compact metadata badges.
    */
-  renderCard(card, listId) {
+  renderCard(card, list) {
     const element = createElement("article", "ot-card");
     const isRenaming = this.editingCardId === card.id;
     element.draggable = !isRenaming;
@@ -231,7 +313,7 @@ class BoardView extends ItemView {
       event.stopPropagation();
       element.classList.remove("is-drop-target");
       const draggedId = event.dataTransfer.getData("text/plain");
-      await this.plugin.moveCard(draggedId, listId, card.id);
+      await this.plugin.moveCard(draggedId, list.id, card.id);
     });
     element.addEventListener("click", () => new CardModal(this.app, this.plugin, card.id).open());
 
@@ -240,6 +322,10 @@ class BoardView extends ItemView {
       const pill = createElement("span", "ot-card-label", label.name);
       pill.style.backgroundColor = label.color;
       pill.title = label.name;
+      pill.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await this.plugin.toggleCompactLabels();
+      });
       labels.append(pill);
     });
 
@@ -390,9 +476,29 @@ class BoardView extends ItemView {
     });
     menu.addItem((item) => {
       item
+        .setTitle("Change list color")
+        .setIcon("palette")
+        .onClick(() => {
+          new ListColorModal(this.app, list.title, list.color, (color) => this.plugin.setListColor(list.id, color)).open();
+        });
+    });
+    menu.addItem((item) => {
+      item
         .setTitle("Delete list")
         .setIcon("trash")
         .onClick(() => this.plugin.deleteList(list.id));
+    });
+    menu.showAtMouseEvent(event);
+  }
+
+  showBoardMenu(event, board) {
+    event.stopPropagation();
+    const menu = new Menu();
+    menu.addItem((item) => {
+      item
+        .setTitle("Rename board")
+        .setIcon("pencil")
+        .onClick(() => this.plugin.renameBoard(board.id));
     });
     menu.showAtMouseEvent(event);
   }

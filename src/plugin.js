@@ -2,20 +2,24 @@ const { Notice, Plugin, addIcon } = require("obsidian");
 
 // Owns the Obsidian plugin lifecycle, saved board data, and Markdown card sync.
 const {
-  BOARD_INDEX_FILE,
-  CARD_FOLDER,
+  BOARD_INDEX_MARKER,
   DEFAULT_DATA,
+  LEGACY_BOARD_INDEX_SUFFIX,
+  LEGACY_CARD_FOLDER,
+  LIST_COLORS,
   TASK_DECK_ICON,
   TASK_DECK_ICON_SVG,
   VIEW_TYPE,
   checklistToMarkdown,
   cleanDate,
+  cleanColor,
   cleanLabelName,
   clone,
   labelKey,
   labelsToFrontmatter,
   parseCardMarkdown,
   cardFileBaseName,
+  taskDeckListTag,
   textLine,
   uid,
 } = require("./helpers");
@@ -38,8 +42,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
-    ["create", "modify", "rename"].forEach((eventName) => {
-      this.registerEvent(this.app.vault.on(eventName, (file) => this.queueCardFolderSync(file)));
+    ["create", "modify", "rename", "delete"].forEach((eventName) => {
+      this.registerEvent(this.app.vault.on(eventName, (file) => this.queueCardFolderSync(file, eventName)));
     });
 
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
@@ -52,9 +56,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       id: "add-card-to-first-list",
       name: "Add card to first list",
       callback: async () => {
-        const firstList = this.getBoard().lists[0];
+        const board = this.getBoard();
+        const firstList = board && board.lists[0];
         if (firstList) {
           await this.addCard(firstList.id);
+        } else if (!board) {
+          new Notice("Create a board first.");
         } else {
           new Notice("Add a list first.");
         }
@@ -63,6 +70,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   async onunload() {
+    if (this.explorerColorStyleEl) this.explorerColorStyleEl.remove();
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
   }
 
@@ -73,31 +81,184 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async loadPluginData() {
     const saved = await this.loadData();
     this.data = Object.assign(clone(DEFAULT_DATA), saved || {});
-    this.data.boards = this.data.boards && this.data.boards.length ? this.data.boards : clone(DEFAULT_DATA.boards);
+    this.data.boards = Array.isArray(this.data.boards) ? this.data.boards : [];
     this.data.cards = this.data.cards || {};
     this.data.labels = this.data.labels || [];
-    this.data.activeBoardId = this.data.activeBoardId || this.data.boards[0].id;
     this.data.completionSound = this.data.completionSound !== false;
+    this.data.compactLabels = !!this.data.compactLabels;
     this.data.labels = this.normalizeGlobalLabels(this.data.labels);
+    this.data.boards = this.data.boards.map((board) => this.normalizeBoard(board));
+    const colored = this.ensureListColors();
     Object.values(this.data.cards).forEach((card) => {
+      card.boardId = card.boardId || this.boardIdForList(card.listId) || this.data.activeBoardId || "";
       card.labels = this.normalizeCardLabels(card.labels || []);
       card.completed = !!card.completed;
       card.startDate = cleanDate(card.startDate);
       card.dueDate = cleanDate(card.dueDate);
     });
+    this.data.boards.forEach((board) => {
+      board.folderPath = board.folderPath || this.inferBoardFolder(board) || cardFileBaseName(board.name);
+    });
+    const restored = await this.restoreBoardsFromIndexFiles();
+    const removedIndexCards = this.removeBoardIndexCards();
+    this.data.activeBoardId = this.findBoard(this.data.activeBoardId)
+      ? this.data.activeBoardId
+      : (this.data.boards[0] && this.data.boards[0].id) || "";
     const renamed = await this.normalizeCardFilePaths();
     await this.syncCardsFromFolder();
-    await this.writeBoardIndexFile();
-    if (renamed) await this.saveData(this.data);
+    await this.writeAllCardFiles();
+    await this.writeBoardIndexFiles();
+    await this.syncGraphColorGroups();
+    this.updateExplorerColors();
+    if (restored || renamed || colored || removedIndexCards) await this.saveData(this.data);
   }
 
   async savePluginData() {
-    await this.writeBoardIndexFile();
+    await this.writeBoardIndexFiles();
+    await this.syncGraphColorGroups();
     await this.saveData(this.data);
   }
 
   getBoard() {
-    return this.data.boards.find((board) => board.id === this.data.activeBoardId) || this.data.boards[0];
+    return this.findBoard(this.data.activeBoardId) || this.data.boards[0] || null;
+  }
+
+  findBoard(boardId) {
+    return this.data.boards.find((board) => board.id === boardId) || null;
+  }
+
+  normalizeBoard(board) {
+    return {
+      id: board && board.id ? board.id : uid("board"),
+      name: textLine(board && board.name) || "Untitled board",
+      folderPath: textLine(board && board.folderPath),
+      lists: Array.isArray(board && board.lists)
+        ? board.lists.map((list) => ({
+          id: list && list.id ? list.id : uid("list"),
+          title: textLine(list && list.title) || "Untitled list",
+          color: cleanColor(list && list.color),
+          cardIds: Array.isArray(list && list.cardIds) ? list.cardIds : [],
+        }))
+        : [],
+    };
+  }
+
+  boardIdForList(listId) {
+    const board = this.data.boards.find((item) => item.lists.some((list) => list.id === listId));
+    return board ? board.id : "";
+  }
+
+  defaultListColor(index) {
+    return LIST_COLORS[index % LIST_COLORS.length];
+  }
+
+  ensureListColors() {
+    let changed = false;
+    this.data.boards.forEach((board) => {
+      board.lists.forEach((list, index) => {
+        if (list.color) return;
+        list.color = this.defaultListColor(index);
+        changed = true;
+      });
+    });
+    return changed;
+  }
+
+  findBoardForCard(card) {
+    if (!card) return this.getBoard();
+    return this.findBoard(card.boardId) || this.findBoard(this.boardIdForList(card.listId)) || this.getBoard();
+  }
+
+  inferBoardFolder(board) {
+    const card = Object.values(this.data.cards).find((item) => {
+      return item.boardId === board.id || board.lists.some((list) => list.id === item.listId || list.cardIds.includes(item.id));
+    });
+    if (card && card.filePath && card.filePath.includes("/")) return card.filePath.split("/").slice(0, -1).join("/");
+    return board.id === "default" ? LEGACY_CARD_FOLDER : "";
+  }
+
+  boardIndexPath(board) {
+    const name = cardFileBaseName(board.name || (board.folderPath || "").split("/").pop() || "Board");
+    return `${board.folderPath}/${name}.md`;
+  }
+
+  legacyBoardIndexPath(board) {
+    return `${board.folderPath}/${LEGACY_BOARD_INDEX_SUFFIX}`;
+  }
+
+  isPotentialBoardIndexFile(file) {
+    if (!file || file.extension !== "md" || !file.path.includes("/")) return false;
+    if (file.name === LEGACY_BOARD_INDEX_SUFFIX) return true;
+    const parts = file.path.split("/");
+    const parent = parts[parts.length - 2];
+    return file.basename === parent || file.basename.endsWith(" Board");
+  }
+
+  async isGeneratedBoardIndexFile(file, markdown = null) {
+    if (!this.isPotentialBoardIndexFile(file)) return false;
+    const text = markdown === null ? await this.app.vault.read(file) : markdown;
+    return text.includes("task-deck-board: true") || text.includes(BOARD_INDEX_MARKER);
+  }
+
+  async restoreBoardsFromIndexFiles() {
+    const knownFolders = new Set(this.data.boards.map((board) => board.folderPath).filter(Boolean));
+    const indexFiles = this.app.vault.getMarkdownFiles().filter((file) => this.isPotentialBoardIndexFile(file));
+    let changed = false;
+
+    for (const indexFile of indexFiles) {
+      const markdown = await this.app.vault.read(indexFile);
+      if (!(await this.isGeneratedBoardIndexFile(indexFile, markdown))) continue;
+
+      const folderPath = indexFile.path.split("/").slice(0, -1).join("/");
+      if (!folderPath || knownFolders.has(folderPath)) continue;
+
+      const explicitIndex = markdown.includes("task-deck-board: true");
+      const heading = markdown.match(/^#\s+(.+?)(?:\s+Board)?\s*$/m);
+      const board = {
+        id: uid("board"),
+        name: textLine(heading && heading[1]) || folderPath.split("/").pop(),
+        folderPath,
+        lists: [],
+      };
+      const listsById = new Map();
+      const sectionMatches = Array.from(markdown.matchAll(/^##\s+(.+)$/gm));
+      let restoredCards = 0;
+
+      for (let index = 0; index < sectionMatches.length; index += 1) {
+        const match = sectionMatches[index];
+        const next = sectionMatches[index + 1];
+        const title = textLine(match[1]) || "Untitled list";
+        const body = markdown.slice(match.index + match[0].length, next ? next.index : markdown.length);
+        const links = Array.from(body.matchAll(/\[\[([^|\]]+)(?:\|[^\]]+)?\]\]/g));
+        const fallbackList = { id: uid("list"), title, color: this.defaultListColor(board.lists.length), cardIds: [] };
+        const listCountBefore = board.lists.length;
+
+        for (const link of links) {
+          const target = link[1].endsWith(".md") ? link[1] : `${link[1]}.md`;
+          const cardFile = this.app.vault.getAbstractFileByPath(target);
+          if (!cardFile || cardFile.extension !== "md") continue;
+
+          const parsed = parseCardMarkdown(await this.app.vault.read(cardFile));
+          if (parsed.boardId) board.id = parsed.boardId;
+          const listId = parsed.listId || uid("list");
+          if (!listsById.has(listId)) {
+            const list = { id: listId, title, color: this.defaultListColor(board.lists.length), cardIds: [] };
+            listsById.set(listId, list);
+            board.lists.push(list);
+          }
+          restoredCards += 1;
+        }
+
+        if (explicitIndex && board.lists.length === listCountBefore) board.lists.push(fallbackList);
+      }
+
+      if (!explicitIndex && !restoredCards) continue;
+      this.data.boards.push(board);
+      knownFolders.add(folderPath);
+      changed = true;
+    }
+
+    return changed;
   }
 
   /**
@@ -151,62 +312,204 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       });
   }
 
-  findList(listId) {
-    return this.getBoard().lists.find((list) => list.id === listId);
+  findList(listId, board = this.getBoard()) {
+    if (!listId) return null;
+    const boards = board ? [board] : this.data.boards;
+    for (const item of boards) {
+      const list = item.lists.find((candidate) => candidate.id === listId);
+      if (list) return list;
+    }
+    return null;
   }
 
-  findListByCard(cardId) {
-    return this.getBoard().lists.find((list) => list.cardIds.includes(cardId));
+  findListByCard(cardId, board = this.getBoard()) {
+    if (!cardId || !board) return null;
+    return board.lists.find((list) => list.cardIds.includes(cardId)) || null;
   }
 
   refreshViews() {
+    this.updateExplorerColors();
     this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
       if (leaf.view && leaf.view.render) leaf.view.render();
     });
   }
 
+  updateExplorerColors() {
+    if (!this.explorerColorStyleEl) {
+      this.explorerColorStyleEl = document.createElement("style");
+      this.explorerColorStyleEl.id = "task-deck-explorer-colors";
+      document.head.append(this.explorerColorStyleEl);
+    }
+
+    const escape = (value) => {
+      if (window.CSS && window.CSS.escape) return window.CSS.escape(value);
+      return String(value).replace(/["\\]/g, "\\$&");
+    };
+    const rules = Object.values(this.data.cards || {})
+      .map((card) => {
+        const board = this.findBoard(card.boardId);
+        const list = this.findList(card.listId, board);
+        const color = cleanColor(list && list.color);
+        if (!card.filePath || !color) return "";
+        const path = escape(card.filePath);
+        return `.nav-file-title[data-path="${path}"]{border-left:3px solid ${color};padding-left:calc(var(--nav-item-padding-left) - 3px);}`;
+      })
+      .filter(Boolean);
+
+    this.explorerColorStyleEl.textContent = rules.join("\n");
+  }
+
+  async toggleCompactLabels() {
+    this.data.compactLabels = !this.data.compactLabels;
+    await this.savePluginData();
+    this.refreshViews();
+  }
+
   isCardFile(file) {
-    return file && file.path && file.path.startsWith(`${CARD_FOLDER}/`) && file.extension === "md";
+    return !!this.boardForFile(file);
+  }
+
+  boardForFile(file) {
+    if (!file || !file.path || file.extension !== "md") return null;
+    return this.data.boards.find((board) => {
+      return board.folderPath
+        && file.path.startsWith(`${board.folderPath}/`)
+        && file.path !== this.boardIndexPath(board)
+        && file.path !== this.legacyBoardIndexPath(board);
+    }) || null;
+  }
+
+  isBoardFolder(file) {
+    return !!(file && file.path && this.data.boards.some((board) => board.folderPath === file.path));
+  }
+
+  removeBoardIndexCards() {
+    const indexPaths = new Set();
+    this.data.boards.forEach((board) => {
+      indexPaths.add(this.boardIndexPath(board));
+      indexPaths.add(this.legacyBoardIndexPath(board));
+    });
+
+    let changed = false;
+    Object.values(this.data.cards).forEach((card) => {
+      if (!indexPaths.has(card.filePath)) return;
+      delete this.data.cards[card.id];
+      changed = true;
+    });
+    if (!changed) return false;
+
+    this.data.boards.forEach((board) => {
+      board.lists.forEach((list) => {
+        list.cardIds = list.cardIds.filter((cardId) => this.data.cards[cardId]);
+      });
+    });
+    return true;
   }
 
   /**
    * Debounces vault events so a save/rename burst only triggers one rescan.
    */
-  queueCardFolderSync(file) {
-    if (!this.isCardFile(file)) return;
+  queueCardFolderSync(file, eventName) {
+    if (!this.isCardFile(file) && !this.isBoardFolder(file)) return;
 
     window.clearTimeout(this.cardFolderSyncTimer);
     this.cardFolderSyncTimer = window.setTimeout(async () => {
+      if (eventName === "delete") {
+        const removedBoard = await this.syncDeletedBoardFolder(file);
+        if (!removedBoard) await this.syncDeletedCardFile(file);
+      }
       await this.syncCardsFromFolder();
       this.refreshViews();
     }, 250);
   }
 
+  removeDeletedBoardFolder(deletedFile) {
+    const deletedPath = deletedFile && deletedFile.path;
+    if (!deletedPath) return false;
+    const removedBoardIds = new Set();
+    this.data.boards = this.data.boards.filter((board) => {
+      if (board.folderPath !== deletedPath) return true;
+      removedBoardIds.add(board.id);
+      return false;
+    });
+    if (!removedBoardIds.size) return false;
+
+    Object.keys(this.data.cards).forEach((cardId) => {
+      if (removedBoardIds.has(this.data.cards[cardId].boardId)) delete this.data.cards[cardId];
+    });
+    this.data.boards.forEach((board) => {
+      board.lists.forEach((list) => {
+        list.cardIds = list.cardIds.filter((cardId) => this.data.cards[cardId]);
+      });
+    });
+    if (!this.findBoard(this.data.activeBoardId)) {
+      this.data.activeBoardId = (this.data.boards[0] && this.data.boards[0].id) || "";
+    }
+    return true;
+  }
+
+  async syncDeletedBoardFolder(file) {
+    if (!this.removeDeletedBoardFolder(file)) return false;
+    await this.savePluginData();
+    return true;
+  }
+
+  async syncDeletedCardFile(file) {
+    const deletedPath = file && file.path;
+    if (!deletedPath) return false;
+    const card = Object.values(this.data.cards).find((item) => item.filePath === deletedPath);
+    if (!card) return false;
+
+    const board = this.findBoard(card.boardId);
+    if (board) {
+      board.lists.forEach((list) => {
+        list.cardIds = list.cardIds.filter((cardId) => cardId !== card.id);
+      });
+    }
+    delete this.data.cards[card.id];
+    await this.savePluginData();
+    return true;
+  }
+
+  async syncCardsFromFolder(board = null) {
+    const boards = board ? [board] : this.data.boards;
+    for (const item of boards) {
+      await this.syncBoardCardsFromFolder(item);
+    }
+  }
+
   /**
-   * Imports Markdown files from CARD_FOLDER into the active board.
-   *
-   * Existing cards are matched first by frontmatter id, then by file path. When
-   * a note has no list id, it stays in its current list or falls back to the
-   * first list so manually-created notes still appear on the board.
+   * Imports Markdown files from a board folder into that board.
    */
-  async syncCardsFromFolder() {
-    const board = this.getBoard();
+  async syncBoardCardsFromFolder(board) {
+    if (!board || !board.folderPath) return;
+    const files = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (!file.path.startsWith(`${board.folderPath}/`)) continue;
+      if (file.path === this.boardIndexPath(board) || file.path === this.legacyBoardIndexPath(board)) continue;
+      if (await this.isGeneratedBoardIndexFile(file)) continue;
+      files.push(file);
+    }
+    let changed = false;
+    if (!files.length) {
+      if (changed) await this.savePluginData();
+      return;
+    }
     if (!board.lists.length) board.lists.push({ id: uid("list"), title: "TODO", cardIds: [] });
 
-    const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${CARD_FOLDER}/`));
-    let changed = false;
     for (const file of files) {
       const markdown = await this.app.vault.read(file);
       const parsed = parseCardMarkdown(markdown);
       const existingByPath = Object.values(this.data.cards).find((card) => card.filePath === file.path);
       const cardId = parsed.id || (existingByPath && existingByPath.id) || uid("card");
       const existing = this.data.cards[cardId] || existingByPath;
-      const targetList = this.findList(parsed.listId) || this.findList(existing && existing.listId) || board.lists[0];
+      const targetList = this.findList(parsed.listId, board) || this.findList(existing && existing.listId, board) || board.lists[0];
       const now = new Date().toISOString();
       const card = existing || { id: cardId, createdAt: now };
 
       Object.assign(card, {
         id: card.id || cardId,
+        boardId: board.id,
         title: parsed.title || file.basename,
         listId: targetList.id,
         labels: parsed.labels.length ? this.normalizeCardLabels(parsed.labels) : this.normalizeCardLabels(card.labels || []),
@@ -225,7 +528,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         changed = true;
       }
 
-      const currentList = this.findListByCard(card.id);
+      const currentList = this.findListByCard(card.id, board);
       if (currentList && currentList.id !== targetList.id) {
         currentList.cardIds = currentList.cardIds.filter((id) => id !== card.id);
       }
@@ -249,9 +552,74 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  createBoardPrompt() {
+    this.promptText("Create board", "Board name", "", async (name) => {
+      await this.createBoard(name);
+    });
+  }
+
+  async createBoard(name) {
+    const board = {
+      id: uid("board"),
+      name,
+      folderPath: await this.nextBoardFolder(name),
+      lists: [],
+    };
+
+    this.data.boards.push(board);
+    this.data.activeBoardId = board.id;
+    await this.ensureBoardFolder(board);
+    await this.savePluginData();
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      if (leaf.view) leaf.view.showingBoardHome = false;
+    });
+    this.refreshViews();
+  }
+
+  async setActiveBoard(boardId) {
+    if (!this.findBoard(boardId)) return;
+    this.data.activeBoardId = boardId;
+    await this.syncCardsFromFolder(this.getBoard());
+    await this.savePluginData();
+    this.refreshViews();
+  }
+
+  renameBoard(boardId) {
+    const board = this.findBoard(boardId);
+    if (!board) return;
+
+    this.promptText("Rename board", "Board name", board.name, async (name) => {
+      await this.renameBoardTo(board, name);
+    });
+  }
+
+  async renameBoardTo(board, name) {
+    const nextFolder = await this.nextBoardFolder(name, board.folderPath);
+    if (nextFolder !== board.folderPath) {
+      const folder = this.app.vault.getAbstractFileByPath(board.folderPath);
+      if (folder) await this.app.vault.rename(folder, nextFolder);
+      Object.values(this.data.cards).forEach((card) => {
+        if (card.boardId === board.id && card.filePath && card.filePath.startsWith(`${board.folderPath}/`)) {
+          card.filePath = `${nextFolder}/${card.filePath.slice(board.folderPath.length + 1)}`;
+        }
+      });
+      board.folderPath = nextFolder;
+    }
+
+    board.name = name;
+    await this.savePluginData();
+    this.refreshViews();
+  }
+
   addList() {
+    if (!this.getBoard()) {
+      this.createBoardPrompt();
+      return;
+    }
+
     this.promptText("Add list", "List name", "", async (title) => {
-      this.getBoard().lists.push({ id: uid("list"), title, cardIds: [] });
+      const board = this.getBoard();
+      board.lists.push({ id: uid("list"), title, color: this.defaultListColor(board.lists.length), cardIds: [] });
       await this.savePluginData();
       this.refreshViews();
     });
@@ -263,15 +631,48 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     this.promptText("Rename list", "List name", list.title, async (title) => {
       list.title = title;
+      await this.writeCardsForList(list);
       await this.savePluginData();
       this.refreshViews();
     });
   }
 
+  async cycleListColor(listId) {
+    const list = this.findList(listId);
+    if (!list) return;
+
+    const current = LIST_COLORS.indexOf(cleanColor(list.color));
+    await this.setListColor(listId, LIST_COLORS[(current + 1) % LIST_COLORS.length]);
+  }
+
+  async setListColor(listId, color) {
+    const list = this.findList(listId);
+    const clean = cleanColor(color);
+    if (!list || !clean) return;
+
+    list.color = clean;
+    await this.writeCardsForList(list);
+    await this.savePluginData();
+    this.refreshViews();
+  }
+
+  async writeCardsForList(list) {
+    for (const cardId of list.cardIds) {
+      const card = this.data.cards[cardId];
+      if (card) await this.writeCardFile(card);
+    }
+  }
+
+  async writeAllCardFiles() {
+    for (const card of Object.values(this.data.cards)) {
+      await this.writeCardFile(card);
+    }
+  }
+
   async deleteList(listId) {
     const board = this.getBoard();
     const list = this.findList(listId);
-    if (!list) return;
+    if (!board || !list) return;
 
     const message = list.cardIds.length
       ? `Delete "${list.title}" and its ${list.cardIds.length} cards?`
@@ -302,12 +703,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    * Creates a card at the top of a list and immediately writes its note file.
    */
   async createCard(listId, title) {
-    const list = this.findList(listId);
-    if (!list) return;
+    const board = this.data.boards.find((item) => item.lists.some((list) => list.id === listId));
+    const list = this.findList(listId, board);
+    if (!board || !list) return;
 
     const now = new Date().toISOString();
     const card = {
       id: uid("card"),
+      boardId: board.id,
       title,
       listId,
       labels: [],
@@ -316,7 +719,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       completed: false,
       startDate: "",
       dueDate: "",
-      filePath: await this.nextCardPath(title),
+      filePath: await this.nextCardPath(title, null, board),
       createdAt: now,
       updatedAt: now,
     };
@@ -355,13 +758,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    */
   async moveCard(cardId, targetListId, beforeCardId) {
     if (!cardId || cardId === beforeCardId) return;
-    const targetList = this.findList(targetListId);
+    const targetBoard = this.data.boards.find((board) => board.lists.some((list) => list.id === targetListId));
+    const targetList = this.findList(targetListId, targetBoard);
     const card = this.data.cards[cardId];
-    if (!targetList || !card) return;
+    if (!targetBoard || !targetList || !card) return;
 
-    this.getBoard().lists.forEach((list) => {
+    this.data.boards.forEach((board) => board.lists.forEach((list) => {
       list.cardIds = list.cardIds.filter((id) => id !== cardId);
-    });
+    }));
 
     const beforeIndex = beforeCardId ? targetList.cardIds.indexOf(beforeCardId) : -1;
     if (beforeIndex === -1) {
@@ -370,6 +774,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       targetList.cardIds.splice(beforeIndex, 0, cardId);
     }
 
+    card.boardId = targetBoard.id;
     card.listId = targetListId;
     await this.writeCardFile(card);
     await this.savePluginData();
@@ -380,6 +785,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (!listId || listId === targetListId) return;
 
     const board = this.getBoard();
+    if (!board) return;
     const fromIndex = board.lists.findIndex((list) => list.id === listId);
     if (fromIndex === -1) return;
 
@@ -426,9 +832,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const card = this.data.cards[cardId];
     if (!card) return;
 
-    this.getBoard().lists.forEach((list) => {
+    this.data.boards.forEach((board) => board.lists.forEach((list) => {
       list.cardIds = list.cardIds.filter((id) => id !== cardId);
-    });
+    }));
 
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
     if (file) await this.app.vault.trash(file, true);
@@ -469,23 +875,38 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     await this.app.workspace.getLeaf(false).openFile(file);
   }
 
-  async ensureCardFolder() {
-    if (!this.app.vault.getAbstractFileByPath(CARD_FOLDER)) {
-      await this.app.vault.createFolder(CARD_FOLDER);
+  async ensureBoardFolder(board) {
+    if (!board) return;
+    if (!board.folderPath) board.folderPath = await this.nextBoardFolder(board.name);
+    if (!this.app.vault.getAbstractFileByPath(board.folderPath)) {
+      await this.app.vault.createFolder(board.folderPath);
     }
   }
 
-  /**
-   * Finds a unique path in CARD_FOLDER, allowing the current path during rename.
-   */
-  async nextCardPath(title, currentPath) {
-    await this.ensureCardFolder();
-
-    const base = cardFileBaseName(title);
-    let path = `${CARD_FOLDER}/${base}.md`;
+  async nextBoardFolder(name, currentPath) {
+    const base = cardFileBaseName(name || "Task Board");
+    let path = base;
     let index = 2;
     while (path !== currentPath && this.app.vault.getAbstractFileByPath(path)) {
-      path = `${CARD_FOLDER}/${base} ${index}.md`;
+      path = `${base} ${index}`;
+      index += 1;
+    }
+    return path;
+  }
+
+  /**
+   * Finds a unique path in a board folder, allowing the current path during rename.
+   */
+  async nextCardPath(title, currentPath, board = null) {
+    const targetBoard = board || this.findBoardForCard(Object.values(this.data.cards).find((card) => card.filePath === currentPath)) || this.getBoard();
+    if (!targetBoard) return `${cardFileBaseName(title)}.md`;
+    await this.ensureBoardFolder(targetBoard);
+
+    const base = cardFileBaseName(title);
+    let path = `${targetBoard.folderPath}/${base}.md`;
+    let index = 2;
+    while (path !== currentPath && this.app.vault.getAbstractFileByPath(path)) {
+      path = `${targetBoard.folderPath}/${base} ${index}.md`;
       index += 1;
     }
     return path;
@@ -502,7 +923,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async normalizeCardFilePath(card) {
     if (!card || !card.title || !card.filePath) return false;
 
-    const nextPath = await this.nextCardPath(card.title, card.filePath);
+    const nextPath = await this.nextCardPath(card.title, card.filePath, this.findBoardForCard(card));
     if (nextPath === card.filePath) return false;
 
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
@@ -514,7 +935,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   async renameCardFile(card, title) {
-    const nextPath = await this.nextCardPath(title, card.filePath);
+    const nextPath = await this.nextCardPath(title, card.filePath, this.findBoardForCard(card));
     if (nextPath === card.filePath) return;
 
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
@@ -536,14 +957,27 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    * Keeps card notes connected in Obsidian's graph without adding extra text to
    * every card file.
    */
-  async writeBoardIndexFile() {
-    const board = this.getBoard();
+  async writeBoardIndexFiles() {
+    for (const board of this.data.boards) {
+      await this.writeBoardIndexFile(board);
+    }
+    await this.cleanupOrphanBoardIndexFiles();
+    this.updateExplorerColors();
+  }
+
+  async writeBoardIndexFile(board) {
     if (!board) return;
+    await this.ensureBoardFolder(board);
 
     const lines = [
-      "# Task Deck Board",
+      "---",
+      "task-deck-board: true",
+      `task-deck-board-id: ${board.id}`,
+      "---",
       "",
-      "Generated by Task Deck so board cards stay connected in Obsidian graph view.",
+      `# ${textLine(board.name)}`,
+      "",
+      BOARD_INDEX_MARKER,
       "",
     ];
 
@@ -559,12 +993,125 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     });
 
     const markdown = lines.join("\n");
-    const file = this.app.vault.getAbstractFileByPath(BOARD_INDEX_FILE);
+    const file = this.app.vault.getAbstractFileByPath(this.boardIndexPath(board));
     if (file && file.extension === "md") {
       await this.app.vault.modify(file, markdown);
     } else if (!file) {
-      await this.app.vault.create(BOARD_INDEX_FILE, markdown);
+      await this.app.vault.create(this.boardIndexPath(board), markdown);
     }
+    await this.cleanupBoardIndexFiles(board);
+  }
+
+  async cleanupBoardIndexFiles(board) {
+    const currentPath = this.boardIndexPath(board);
+    const files = this.app.vault.getMarkdownFiles().filter((file) => {
+      return file.path.startsWith(`${board.folderPath}/`) && file.path !== currentPath;
+    });
+
+    for (const file of files) {
+      if (await this.isGeneratedBoardIndexFile(file)) await this.app.vault.trash(file, true);
+    }
+  }
+
+  async cleanupOrphanBoardIndexFiles() {
+    const activeFolders = new Set(this.data.boards.map((board) => board.folderPath).filter(Boolean));
+    const files = this.app.vault.getMarkdownFiles().filter((file) => this.isPotentialBoardIndexFile(file));
+
+    for (const file of files) {
+      const folderPath = file.path.split("/").slice(0, -1).join("/");
+      if (activeFolders.has(folderPath)) continue;
+      if (await this.isGeneratedBoardIndexFile(file)) await this.app.vault.trash(file, true);
+    }
+  }
+
+  frontmatterText(value) {
+    return JSON.stringify(textLine(value));
+  }
+
+  taskDeckTag(board, list) {
+    if (!board || !list) return "";
+    return taskDeckListTag(board.name, list.title);
+  }
+
+  extractTags(markdown) {
+    const frontmatter = String(markdown || "").match(/^---\n([\s\S]*?)\n---/);
+    if (!frontmatter) return [];
+
+    const lines = frontmatter[1].split(/\r?\n/);
+    const tags = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(/^tags:\s*(.*)$/);
+      if (!match) continue;
+
+      const value = match[1].trim();
+      if (value.startsWith("[") && value.endsWith("]")) {
+        value.slice(1, -1).split(",").forEach((part) => tags.push(part.trim().replace(/^["'#]+|["']+$/g, "")));
+        break;
+      }
+      if (value) {
+        value.split(/[,\s]+/).forEach((part) => tags.push(part.trim().replace(/^#/, "")));
+        break;
+      }
+      for (let itemIndex = index + 1; itemIndex < lines.length; itemIndex += 1) {
+        const item = lines[itemIndex].match(/^\s*-\s*(.+)$/);
+        if (!item) break;
+        tags.push(item[1].trim().replace(/^["'#]+|["']+$/g, ""));
+      }
+      break;
+    }
+
+    return tags.filter(Boolean);
+  }
+
+  async cardTags(card, taskTag) {
+    const file = this.app.vault.getAbstractFileByPath(card.filePath);
+    const existing = file && file.extension === "md" ? this.extractTags(await this.app.vault.read(file)) : [];
+    const tags = existing.filter((tag) => !tag.startsWith("task-deck/"));
+    if (taskTag) tags.push(taskTag);
+    return Array.from(new Set(tags));
+  }
+
+  tagFrontmatter(tags) {
+    if (!tags.length) return "tags: []";
+    return `tags: [${tags.map((tag) => JSON.stringify(tag)).join(", ")}]`;
+  }
+
+  graphColorGroup(board, list) {
+    const tag = this.taskDeckTag(board, list);
+    const color = cleanColor(list && list.color);
+    if (!tag || !color) return null;
+
+    return {
+      query: `tag:#${tag}`,
+      color: {
+        a: 1,
+        rgb: parseInt(color.slice(1), 16),
+      },
+    };
+  }
+
+  async syncGraphColorGroups() {
+    const adapter = this.app.vault.adapter;
+    if (!adapter || !adapter.exists || !adapter.read || !adapter.write) return;
+
+    const graphPath = `${this.app.vault.configDir || ".obsidian"}/graph.json`;
+    const exists = await adapter.exists(graphPath);
+    const graph = exists ? JSON.parse(await adapter.read(graphPath)) : {};
+    const existing = Array.isArray(graph.colorGroups) ? graph.colorGroups : [];
+    const keep = existing.filter((group) => !(group && String(group.query || "").startsWith("tag:#task-deck/")));
+    const taskDeckGroups = [];
+
+    this.data.boards.forEach((board) => {
+      board.lists.forEach((list) => {
+        if (!list.cardIds.length) return;
+        const group = this.graphColorGroup(board, list);
+        if (group) taskDeckGroups.push(group);
+      });
+    });
+
+    graph["collapse-color-groups"] = false;
+    graph.colorGroups = keep.concat(taskDeckGroups);
+    await adapter.write(graphPath, JSON.stringify(graph, null, 2));
   }
 
   /**
@@ -574,13 +1121,21 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    * as normal Markdown so users can edit card content directly in the vault.
    */
   async writeCardFile(card) {
-    await this.ensureCardFolder();
+    const board = this.findBoardForCard(card);
+    if (board) card.boardId = board.id;
+    await this.ensureBoardFolder(board);
+    const list = this.findList(card.listId, board);
+    const tags = await this.cardTags(card, this.taskDeckTag(board, list));
 
     const markdown = [
       "---",
       `kanban-card-id: ${card.id}`,
-      `kanban-board-id: ${this.getBoard().id}`,
+      `kanban-board-id: ${card.boardId || ""}`,
       `kanban-list-id: ${card.listId || ""}`,
+      this.tagFrontmatter(tags),
+      `task-deck-board: ${this.frontmatterText(board && board.name)}`,
+      `task-deck-list: ${this.frontmatterText(list && list.title)}`,
+      `task-deck-list-color: ${this.frontmatterText(cleanColor(list && list.color))}`,
       `labels: ${labelsToFrontmatter(card.labels)}`,
       `completed: ${card.completed ? "true" : "false"}`,
       `start: ${cleanDate(card.startDate)}`,

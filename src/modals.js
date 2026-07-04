@@ -4,9 +4,12 @@ const { MarkdownRenderer, Modal, Notice, setIcon } = require("obsidian");
 const {
   DEFAULT_LABEL_COLOR,
   LABEL_COLORS,
+  LIST_COLORS,
   addMonths,
+  addButtonIcon,
   checklistStats,
   cleanDate,
+  cleanColor,
   cleanLabelName,
   clone,
   createElement,
@@ -29,6 +32,7 @@ class TextPromptModal extends Modal {
     this.placeholder = placeholder;
     this.initialValue = initialValue || "";
     this.onSubmit = onSubmit;
+    this.submitting = false;
   }
 
   onOpen() {
@@ -46,13 +50,18 @@ class TextPromptModal extends Modal {
     const actions = createElement("div", "ot-modal-actions");
     const cancel = createElement("button", "", "Cancel");
     const save = createElement("button", "mod-cta", "Save");
+    addButtonIcon(cancel, "x");
+    addButtonIcon(save, "check");
     cancel.type = "button";
     save.type = "button";
 
     cancel.addEventListener("click", () => this.close());
     save.addEventListener("click", () => this.submit(input.value));
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") this.submit(input.value);
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.submit(input.value);
+      }
     });
 
     actions.append(cancel, save);
@@ -62,14 +71,19 @@ class TextPromptModal extends Modal {
   }
 
   submit(value) {
+    if (this.submitting) return;
     const cleanValue = textLine(value);
     if (!cleanValue) {
       new Notice("Name cannot be empty.");
       return;
     }
 
-    this.onSubmit(cleanValue);
+    this.submitting = true;
     this.close();
+    Promise.resolve(this.onSubmit(cleanValue)).catch((error) => {
+      console.error(error);
+      new Notice("Could not save.");
+    });
   }
 }
 
@@ -218,8 +232,9 @@ class LabelPickerModal extends Modal {
     const renderCreateArea = () => {
       createArea.replaceChildren();
 
-      const create = createElement("button", "ot-label-create-button", "Create new label");
-      create.type = "button";
+    const create = createElement("button", "ot-label-create-button", "Create new label");
+    addButtonIcon(create, "plus");
+    create.type = "button";
       create.addEventListener("click", () => {
         this.creating = true;
         this.editingKey = null;
@@ -292,6 +307,7 @@ class LabelPickerModal extends Modal {
 
     const footer = createElement("div", "ot-label-create-footer");
     const create = createElement("button", "mod-cta", this.editingKey ? "Save" : "Create");
+    addButtonIcon(create, this.editingKey ? "check" : "plus");
     create.type = "submit";
     footer.append(create);
 
@@ -307,6 +323,79 @@ class LabelPickerModal extends Modal {
     form.append(titleField, colorField, removeColor, footer);
     this.contentEl.append(header, previewBand, form);
     requestAnimationFrame(() => title.focus());
+  }
+}
+
+class ListColorModal extends Modal {
+  constructor(app, title, currentColor, onSelect) {
+    super(app);
+    this.title = title;
+    this.currentColor = cleanColor(currentColor) || LIST_COLORS[0];
+    this.onSelect = onSelect;
+  }
+
+  onOpen() {
+    this.contentEl.replaceChildren();
+    this.contentEl.addClass("ot-label-modal", "ot-list-color-modal");
+
+    const header = createElement("div", "ot-label-modal-header");
+    header.append(createElement("h2", "", "List color"));
+
+    const previewBand = createElement("div", "ot-label-create-preview-band");
+    const preview = createElement("div", "ot-label-preview-pill", this.title || "List");
+    preview.style.backgroundColor = this.currentColor;
+    previewBand.append(preview);
+
+    const field = createElement("div", "ot-field");
+    field.append(createElement("span", "", "Choose color"));
+    const swatches = createElement("div", "ot-label-color-grid");
+    LIST_COLORS.forEach((color) => {
+      const swatch = createElement("button", "ot-label-color-swatch");
+      swatch.type = "button";
+      swatch.style.backgroundColor = color;
+      swatch.setAttribute("aria-label", color);
+      if (color === this.currentColor) {
+        swatch.classList.add("is-selected");
+        try {
+          setIcon(swatch, "check");
+        } catch (error) {
+          swatch.textContent = "✓";
+        }
+      }
+      swatch.addEventListener("click", async () => {
+        await this.onSelect(color);
+        this.close();
+      });
+      swatches.append(swatch);
+    });
+    field.append(swatches);
+
+    const customField = createElement("label", "ot-field");
+    customField.append(createElement("span", "", "Custom color"));
+    const custom = createElement("input", "ot-color-input");
+    custom.type = "color";
+    custom.value = this.currentColor;
+    custom.addEventListener("input", () => {
+      this.currentColor = custom.value;
+      preview.style.backgroundColor = this.currentColor;
+    });
+    customField.append(custom);
+
+    const actions = createElement("div", "ot-modal-actions");
+    const cancel = createElement("button", "", "Cancel");
+    const save = createElement("button", "mod-cta", "Save");
+    addButtonIcon(cancel, "x");
+    addButtonIcon(save, "check");
+    cancel.type = "button";
+    save.type = "button";
+    cancel.addEventListener("click", () => this.close());
+    save.addEventListener("click", async () => {
+      await this.onSelect(custom.value);
+      this.close();
+    });
+    actions.append(cancel, save);
+
+    this.contentEl.append(header, previewBand, field, customField, actions);
   }
 }
 
@@ -443,6 +532,9 @@ class CardDatesModal extends Modal {
     const clear = createElement("button", "", "Clear dates");
     const cancel = createElement("button", "", "Cancel");
     const save = createElement("button", "mod-cta", "Save");
+    addButtonIcon(clear, "x");
+    addButtonIcon(cancel, "x");
+    addButtonIcon(save, "check");
 
     [clear, cancel, save].forEach((button) => {
       button.type = "button";
@@ -501,6 +593,9 @@ class AboutModal extends Modal {
     const openSettings = createElement("button", "", "Open settings");
     const sync = createElement("button", "", "Sync notes");
     const close = createElement("button", "mod-cta", "Close");
+    addButtonIcon(openSettings, "settings");
+    addButtonIcon(sync, "refresh-cw");
+    addButtonIcon(close, "x");
     [openSettings, sync, close].forEach((button) => {
       button.type = "button";
     });
@@ -523,20 +618,23 @@ class AboutModal extends Modal {
 /**
  * Full card editor.
  *
- * Edits stay local until Save/Open note is clicked. That keeps Cancel simple
- * and avoids writing partial checklist or details changes to the note file.
+ * Card edits are persisted while the modal is open so closing the editor never
+ * drops checklist, label, title, or details changes.
  */
 class CardModal extends Modal {
   constructor(app, plugin, cardId) {
     super(app);
     this.plugin = plugin;
     this.cardId = cardId;
+    this.localTitle = "";
     this.localLabels = [];
     this.localGlobalLabels = [];
     this.localDetails = "";
     this.localChecklist = [];
     this.detailsTextarea = null;
     this.addingChecklistItem = false;
+    this.saveTimer = null;
+    this.savePromise = Promise.resolve();
   }
 
   onOpen() {
@@ -561,6 +659,7 @@ class CardModal extends Modal {
 
     await this.plugin.hydrateCardFromFile(card);
     this.card = card;
+    this.localTitle = card.title || "";
     this.localLabels = clone(card.labels || []);
     this.localGlobalLabels = clone(this.plugin.data.labels || []);
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
@@ -597,8 +696,12 @@ class CardModal extends Modal {
 
     const title = createElement("input", "ot-title-input");
     title.type = "text";
-    title.value = card.title;
+    title.value = this.localTitle;
     title.placeholder = "Card title";
+    title.addEventListener("input", () => {
+      this.localTitle = title.value;
+      this.queueSave();
+    });
 
     const labelsField = this.renderLabelsField();
     const detailsField = this.renderDetailsField();
@@ -607,10 +710,12 @@ class CardModal extends Modal {
     const actions = createElement("div", "ot-modal-actions");
     const deleteButton = createElement("button", "mod-warning", "Delete");
     const openNote = createElement("button", "", "Open note");
-    const cancel = createElement("button", "", "Cancel");
-    const save = createElement("button", "mod-cta", "Save");
+    const close = createElement("button", "mod-cta", "Close");
+    addButtonIcon(deleteButton, "trash");
+    addButtonIcon(openNote, "file-text");
+    addButtonIcon(close, "x");
 
-    [deleteButton, openNote, cancel, save].forEach((button) => {
+    [deleteButton, openNote, close].forEach((button) => {
       button.type = "button";
     });
 
@@ -621,21 +726,29 @@ class CardModal extends Modal {
     });
 
     openNote.addEventListener("click", async () => {
-      await this.saveFromForm(title);
+      await this.saveNow();
       await this.plugin.openCardFile(card.id);
       this.close();
     });
 
-    cancel.addEventListener("click", () => this.close());
-    save.addEventListener("click", async () => {
-      await this.saveFromForm(title);
+    close.addEventListener("click", async () => {
+      await this.saveNow();
       this.close();
     });
 
-    actions.append(deleteButton, openNote, cancel, save);
+    actions.append(deleteButton, openNote, close);
 
     this.contentEl.append(title, labelsField, detailsField, checklistField, actions);
     requestAnimationFrame(() => title.focus());
+  }
+
+  onClose() {
+    if (this.saveTimer) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+      this.saveNow().catch(console.error);
+    }
+    this.contentEl.replaceChildren();
   }
 
   renderLabelsField() {
@@ -647,6 +760,7 @@ class CardModal extends Modal {
         this.localGlobalLabels = labels;
         this.localLabels = selectedLabels;
         renderLabels();
+        this.saveNow().catch(console.error);
       }).open();
     });
     addButton.classList.add("ot-label-add-button");
@@ -663,6 +777,7 @@ class CardModal extends Modal {
         pill.addEventListener("click", () => {
           this.localLabels.splice(index, 1);
           renderLabels();
+          this.saveNow().catch(console.error);
         });
         labelsWrap.append(pill);
       });
@@ -719,8 +834,12 @@ class CardModal extends Modal {
     preview.addEventListener("click", showEditor);
     editor.addEventListener("input", () => {
       this.localDetails = editor.value;
+      this.queueSave();
     });
-    editor.addEventListener("blur", showPreview);
+    editor.addEventListener("blur", () => {
+      showPreview();
+      this.saveNow().catch(console.error);
+    });
 
     renderPreview();
     field.append(preview, editor);
@@ -774,15 +893,18 @@ class CardModal extends Modal {
         const remove = iconButton("x", "Remove item", () => {
           this.localChecklist.splice(index, 1);
           renderChecklist();
+          this.saveNow().catch(console.error);
         });
         remove.addEventListener("click", (event) => event.stopPropagation());
 
         checkbox.addEventListener("change", () => {
           item.done = checkbox.checked;
           updateProgress();
+          this.saveNow().catch(console.error);
         });
         input.addEventListener("input", () => {
           item.text = input.value;
+          this.queueSave();
         });
         row.append(checkbox, input, remove);
         list.append(row);
@@ -807,6 +929,7 @@ class CardModal extends Modal {
       addInput.type = "text";
       addInput.placeholder = "Checklist item";
       const addButton = createElement("button", "mod-cta", "Add");
+      addButtonIcon(addButton, "plus");
       const cancel = iconButton("x", "Cancel", () => {
         this.addingChecklistItem = false;
         renderAddArea();
@@ -824,6 +947,7 @@ class CardModal extends Modal {
         this.addingChecklistItem = false;
         renderChecklist();
         renderAddArea();
+        this.saveNow().catch(console.error);
       });
       addInput.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
@@ -844,23 +968,53 @@ class CardModal extends Modal {
   /**
    * Sanitizes modal state and writes it through the plugin's card updater.
    */
-  async saveFromForm(titleInput) {
+  cardPatch() {
     if (this.detailsTextarea) this.localDetails = this.detailsTextarea.value;
 
-    await this.plugin.updateCard(this.card.id, {
-      title: textLine(titleInput.value) || this.card.title,
+    return {
+      title: textLine(this.localTitle) || this.card.title,
       labels: clone(this.localLabels),
       details: this.localDetails.trim(),
       checklist: this.localChecklist
         .map((item) => ({ done: !!item.done, text: textLine(item.text) }))
         .filter((item) => item.text),
-    }, clone(this.localGlobalLabels));
+    };
+  }
+
+  queueSave() {
+    if (this.saveTimer) window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      this.saveNow().catch(console.error);
+    }, 350);
+  }
+
+  async saveNow() {
+    if (this.saveTimer) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+
+    const card = this.card;
+    if (!card) return;
+
+    const patch = this.cardPatch();
+    const globalLabels = clone(this.localGlobalLabels);
+    this.savePromise = this.savePromise
+      .then(() => this.plugin.updateCard(card.id, patch, globalLabels))
+      .catch((error) => {
+        console.error(error);
+        new Notice("Could not save card.");
+      });
+
+    await this.savePromise;
   }
 }
 
 module.exports = {
   TextPromptModal,
   LabelPickerModal,
+  ListColorModal,
   CardDatesModal,
   AboutModal,
   CardModal,
