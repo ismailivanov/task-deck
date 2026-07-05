@@ -472,9 +472,21 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   async syncCardsFromFolder(board = null) {
+    const restored = board ? false : await this.restoreBoardsFromIndexFiles();
+    if (restored) {
+      this.ensureListColors();
+      if (!this.findBoard(this.data.activeBoardId)) {
+        this.data.activeBoardId = (this.data.boards[0] && this.data.boards[0].id) || "";
+      }
+    }
+
     const boards = board ? [board] : this.data.boards;
     for (const item of boards) {
       await this.syncBoardCardsFromFolder(item);
+    }
+
+    if (restored) {
+      await this.savePluginData();
     }
   }
 
