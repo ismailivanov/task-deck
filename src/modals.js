@@ -806,7 +806,7 @@ class CardModal extends Modal {
     const members = this.plugin.getVaultMembers();
     const menu = new Menu();
     if (!members.length) {
-      menu.addItem((item) => item.setTitle("No members — sign in to SyncDeck").setDisabled(true));
+      menu.addItem((item) => item.setTitle("No members — sign in to Sync Deck").setDisabled(true));
     } else {
       members.forEach((member) => {
         const assigned = (this.localAssignees || []).some((a) => a.email === member.email);

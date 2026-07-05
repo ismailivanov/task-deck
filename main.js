@@ -1315,7 +1315,7 @@ class CardModal extends Modal {
     const members = this.plugin.getVaultMembers();
     const menu = new Menu();
     if (!members.length) {
-      menu.addItem((item) => item.setTitle("No members — sign in to SyncDeck").setDisabled(true));
+      menu.addItem((item) => item.setTitle("No members — sign in to Sync Deck").setDisabled(true));
     } else {
       members.forEach((member) => {
         const assigned = (this.localAssignees || []).some((a) => a.email === member.email);
@@ -2757,6 +2757,8 @@ const { TaskDeckSettingTab } = __require("src/settings-tab.js");
  */
 module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async onload() {
+    // In-memory load only (reads data.json + normalizes) so this.data exists for
+    // the board view. Heavy vault I/O is deferred to onLayoutReady below.
     await this.loadPluginData();
 
     // Live "someone else is editing this card" locks, keyed by card id. Filled
@@ -2769,6 +2771,16 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
     ["create", "modify", "rename", "delete"].forEach((eventName) => {
       this.registerEvent(this.app.vault.on(eventName, (file) => this.queueCardFolderSync(file, eventName)));
+    });
+
+    // Reconcile card notes AFTER the workspace + metadata cache are ready, and
+    // never let it reject onload(): a startup file error used to crash onload and
+    // leave the plugin disabled until manually toggled off/on on every restart.
+    this.app.workspace.onLayoutReady(() => {
+      this.reconcileVaultFiles().catch((error) => {
+        console.error("Task Deck: startup vault reconcile failed", error);
+        new Notice("Task Deck loaded, but reconciling notes hit an error. Your boards are intact.");
+      });
     });
 
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
@@ -2813,7 +2825,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.compactLabels = !!this.data.compactLabels;
     this.data.labels = this.normalizeGlobalLabels(this.data.labels);
     this.data.boards = this.data.boards.map((board) => this.normalizeBoard(board));
-    const colored = this.ensureListColors();
+    this.loadNeedsSave = this.ensureListColors();
     Object.values(this.data.cards).forEach((card) => {
       card.boardId = card.boardId || this.boardIdForList(card.listId) || this.data.activeBoardId || "";
       card.labels = this.normalizeCardLabels(card.labels || []);
@@ -2824,18 +2836,37 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.boards.forEach((board) => {
       board.folderPath = board.folderPath || this.inferBoardFolder(board) || cardFileBaseName(board.name);
     });
-    const restored = await this.restoreBoardsFromIndexFiles();
-    const removedIndexCards = this.removeBoardIndexCards();
     this.data.activeBoardId = this.findBoard(this.data.activeBoardId)
       ? this.data.activeBoardId
       : (this.data.boards[0] && this.data.boards[0].id) || "";
-    const renamed = await this.normalizeCardFilePaths();
-    await this.syncCardsFromFolder();
-    await this.writeAllCardFiles();
-    await this.writeBoardIndexFiles();
-    await this.syncGraphColorGroups();
-    this.updateExplorerColors();
-    if (restored || renamed || colored || removedIndexCards) await this.saveData(this.data);
+  }
+
+  /**
+   * Heavy vault reconciliation: import card notes, restore boards from index
+   * files, and rewrite files. Deferred to onLayoutReady and guarded so a startup
+   * file error can never reject onload() — which would disable the plugin and
+   * force a manual re-enable on every restart. The `reconciling` flag stops our
+   * own writes here from re-triggering the folder-sync event handler.
+   */
+  async reconcileVaultFiles() {
+    this.reconciling = true;
+    try {
+      const restored = await this.restoreBoardsFromIndexFiles();
+      const removedIndexCards = this.removeBoardIndexCards();
+      this.data.activeBoardId = this.findBoard(this.data.activeBoardId)
+        ? this.data.activeBoardId
+        : (this.data.boards[0] && this.data.boards[0].id) || "";
+      const renamed = await this.normalizeCardFilePaths();
+      await this.syncCardsFromFolder();
+      await this.writeAllCardFiles();
+      await this.writeBoardIndexFiles();
+      await this.syncGraphColorGroups();
+      this.updateExplorerColors();
+      if (restored || renamed || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
+    } finally {
+      this.reconciling = false;
+    }
+    this.refreshViews();
   }
 
   async savePluginData() {
@@ -3260,6 +3291,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    * Debounces vault events so a save/rename burst only triggers one rescan.
    */
   queueCardFolderSync(file, eventName) {
+    // Ignore the writes our own startup reconcile makes; it re-imports at the end.
+    if (this.reconciling) return;
     if (!this.isCardFile(file) && !this.isBoardFolder(file)) return;
 
     window.clearTimeout(this.cardFolderSyncTimer);
