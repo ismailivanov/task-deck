@@ -373,7 +373,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   getSyncDeckPlugin() {
     const plugins = this.app.plugins && this.app.plugins.plugins;
-    return plugins && (plugins["sync-deck"] || plugins["sync-desk"]) || null;
+    return (plugins && plugins["sync-deck"]) || null;
   }
 
   getSyncDeckBridge() {
