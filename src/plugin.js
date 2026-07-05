@@ -334,6 +334,52 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     });
   }
 
+  getSyncDeckPlugin() {
+    const plugins = this.app.plugins && this.app.plugins.plugins;
+    return plugins && (plugins["sync-deck"] || plugins["sync-desk"]) || null;
+  }
+
+  getSyncDeckBridge() {
+    const syncDeck = this.getSyncDeckPlugin();
+    const data = syncDeck && syncDeck.data;
+    if (!syncDeck || typeof syncDeck.api !== "function") return null;
+    if (!data || !data.signedIn || !data.authToken || !data.vaultId) return null;
+    return syncDeck;
+  }
+
+  async sendBoardPresence(board, point) {
+    const syncDeck = this.getSyncDeckBridge();
+    if (!syncDeck || !board || !point) return [];
+
+    try {
+      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence`, {
+        method: "POST",
+        body: {
+          boardId: board.id,
+          boardName: board.name,
+          x: point.x,
+          y: point.y,
+          color: syncDeck.data.user.color || "#8b5cf6",
+        },
+      });
+      return Array.isArray(result.users) ? result.users : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  async fetchBoardPresence(boardId) {
+    const syncDeck = this.getSyncDeckBridge();
+    if (!syncDeck || !boardId) return [];
+
+    try {
+      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardId)}`);
+      return Array.isArray(result.users) ? result.users : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
   updateExplorerColors() {
     if (!this.explorerColorStyleEl) {
       this.explorerColorStyleEl = document.createElement("style");

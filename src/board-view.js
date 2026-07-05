@@ -48,8 +48,13 @@ class BoardView extends ItemView {
     this.render();
   }
 
+  async onClose() {
+    this.stopPresence();
+  }
+
   render() {
     const board = this.plugin.getBoard();
+    this.stopPresence();
     this.contentEl.replaceChildren();
     this.contentEl.addClass("ot-board-root");
     this.contentEl.classList.toggle("is-compact-labels", !!this.plugin.data.compactLabels);
@@ -81,6 +86,89 @@ class BoardView extends ItemView {
     board.lists.forEach((list) => scroller.append(this.renderList(list)));
 
     this.contentEl.append(toolbar, scroller);
+    this.startPresence(board);
+  }
+
+  startPresence(board) {
+    if (!this.plugin.getSyncDeckBridge()) return;
+
+    this.presenceBoard = board;
+    this.presencePoint = { x: 0.5, y: 0.08 };
+    this.presenceLayer = createElement("div", "ot-presence-layer");
+    this.contentEl.append(this.presenceLayer);
+
+    this.presenceMouseHandler = (event) => {
+      const rect = this.contentEl.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+      this.presencePoint = { x, y };
+      this.sendPresence();
+    };
+    this.contentEl.addEventListener("pointermove", this.presenceMouseHandler);
+
+    this.presencePollTimer = window.setInterval(() => this.updatePresenceUsers(), 900);
+    this.presenceHeartbeatTimer = window.setInterval(() => this.sendPresence(true), 2500);
+    this.sendPresence(true);
+    this.updatePresenceUsers();
+  }
+
+  stopPresence() {
+    if (this.presenceMouseHandler) this.contentEl.removeEventListener("pointermove", this.presenceMouseHandler);
+    if (this.presencePollTimer) window.clearInterval(this.presencePollTimer);
+    if (this.presenceHeartbeatTimer) window.clearInterval(this.presenceHeartbeatTimer);
+    if (this.presenceLayer && this.presenceLayer.parentElement) this.presenceLayer.remove();
+    this.presenceMouseHandler = null;
+    this.presencePollTimer = null;
+    this.presenceHeartbeatTimer = null;
+    this.presenceLayer = null;
+    this.presenceBoard = null;
+    this.presenceSendInFlight = false;
+  }
+
+  sendPresence(force = false) {
+    if (!this.presenceBoard || !this.presencePoint) return;
+    const now = Date.now();
+    if (!force && now - (this.lastPresenceSendAt || 0) < 220) return;
+    if (this.presenceSendInFlight) return;
+
+    this.lastPresenceSendAt = now;
+    this.presenceSendInFlight = true;
+    this.plugin.sendBoardPresence(this.presenceBoard, this.presencePoint)
+      .then((users) => this.renderPresenceUsers(users))
+      .finally(() => {
+        this.presenceSendInFlight = false;
+      });
+  }
+
+  updatePresenceUsers() {
+    if (!this.presenceBoard) return;
+    this.plugin.fetchBoardPresence(this.presenceBoard.id)
+      .then((users) => this.renderPresenceUsers(users));
+  }
+
+  renderPresenceUsers(users) {
+    if (!this.presenceLayer) return;
+
+    this.presenceLayer.replaceChildren();
+    users.forEach((user) => {
+      if (!Number.isFinite(user.x) || !Number.isFinite(user.y)) return;
+      const cursor = createElement("div", "ot-presence-cursor");
+      cursor.style.left = `${Math.max(0, Math.min(1, user.x)) * 100}%`;
+      cursor.style.top = `${Math.max(0, Math.min(1, user.y)) * 100}%`;
+      cursor.style.setProperty("--ot-presence-color", user.color || "#8b5cf6");
+
+      const label = createElement("span", "ot-presence-name");
+      if (user.picture) {
+        const avatar = createElement("img", "ot-presence-avatar");
+        avatar.src = user.picture;
+        avatar.alt = "";
+        label.append(avatar);
+      }
+      label.append(createElement("span", "", user.name || user.email || "User"));
+      cursor.append(createElement("span", "ot-presence-arrow"), label);
+      this.presenceLayer.append(cursor);
+    });
   }
 
   renderBoardHome() {
