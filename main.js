@@ -440,11 +440,15 @@ function parseCardMarkdown(markdown) {
   const completed = frontmatterValue(markdown, "completed");
   const start = frontmatterValue(markdown, "start");
   const due = frontmatterValue(markdown, "due");
+  const positionRaw = frontmatterValue(markdown, "position");
+  const position = positionRaw !== null && positionRaw !== "" && !Number.isNaN(Number(positionRaw)) ? Number(positionRaw) : null;
 
   return {
     id: frontmatterValue(markdown, "kanban-card-id") || "",
     boardId: frontmatterValue(markdown, "kanban-board-id") || "",
     listId: frontmatterValue(markdown, "kanban-list-id") || "",
+    listTitle: frontmatterValue(markdown, "task-deck-list") || "",
+    position,
     title: titleMatch ? titleMatch[1].trim() : "",
     labels: labels !== null ? parseLabels(labels) : [],
     assignees: assignees !== null ? parseAssignees(assignees) : null,
@@ -3398,7 +3402,17 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       const existingByPath = Object.values(this.data.cards).find((card) => card.filePath === file.path);
       const cardId = parsed.id || (existingByPath && existingByPath.id) || uid("card");
       const existing = this.data.cards[cardId] || existingByPath;
-      const targetList = this.findList(parsed.listId, board) || this.findList(existing && existing.listId, board) || board.lists[0];
+      // Resolve the card's list from its frontmatter id. If we don't have that
+      // list yet (e.g. the card was moved into a list that was empty on this
+      // device, so no card carried its id), create it from the frontmatter title
+      // instead of silently dropping the card into the first list.
+      let targetList = this.findList(parsed.listId, board);
+      if (!targetList && parsed.listId) {
+        targetList = { id: parsed.listId, title: parsed.listTitle || "List", color: this.defaultListColor(board.lists.length), cardIds: [] };
+        board.lists.push(targetList);
+        changed = true;
+      }
+      targetList = targetList || this.findList(existing && existing.listId, board) || board.lists[0];
       const now = new Date().toISOString();
       const card = existing || { id: cardId, createdAt: now };
 
@@ -3407,6 +3421,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         boardId: board.id,
         title: parsed.title || file.basename,
         listId: targetList.id,
+        position: parsed.position !== null ? parsed.position : (card.position != null ? card.position : 0),
         labels: parsed.labels.length ? this.normalizeCardLabels(parsed.labels) : this.normalizeCardLabels(card.labels || []),
         assignees: this.normalizeAssignees(parsed.assignees !== null ? parsed.assignees : card.assignees || []),
         details: parsed.details,
@@ -3433,6 +3448,21 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         changed = true;
       }
     }
+
+    // Restore each list's order from the synced `position` frontmatter. Stable
+    // sort, so cards that share a position (e.g. legacy files with no position)
+    // keep their relative order. Only flags changed when the order actually moved.
+    board.lists.forEach((list) => {
+      const before = list.cardIds.join(",");
+      list.cardIds.sort((a, b) => {
+        const ca = this.data.cards[a];
+        const cb = this.data.cards[b];
+        const pa = ca && ca.position != null ? ca.position : 0;
+        const pb = cb && cb.position != null ? cb.position : 0;
+        return pa - pb;
+      });
+      if (list.cardIds.join(",") !== before) changed = true;
+    });
 
     if (changed) await this.savePluginData();
   }
@@ -3623,7 +3653,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     this.data.cards[card.id] = card;
     list.cardIds.unshift(card.id);
-    await this.writeCardFile(card);
+    // Inserting at the top shifts every other card's index, so rewrite the whole
+    // list's files to keep their `position` frontmatter in sync (not just the new
+    // card) — otherwise the new order wouldn't propagate to other devices.
+    await this.writeListCardFiles(list);
     await this.savePluginData();
     this.refreshViews();
   }
@@ -3661,6 +3694,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const card = this.data.cards[cardId];
     if (!targetBoard || !targetList || !card) return;
 
+    // Remember where it came from so we can rewrite that list's order too.
+    const sourceList = this.data.boards.flatMap((board) => board.lists).find((list) => list.cardIds.includes(cardId)) || null;
+
     this.data.boards.forEach((board) => board.lists.forEach((list) => {
       list.cardIds = list.cardIds.filter((id) => id !== cardId);
     }));
@@ -3674,9 +3710,21 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     card.boardId = targetBoard.id;
     card.listId = targetListId;
-    await this.writeCardFile(card);
+    // Persist the new order: rewrite every card in the affected list(s) so their
+    // `position` frontmatter reflects the new order and syncs to other devices.
+    await this.writeListCardFiles(targetList);
+    if (sourceList && sourceList.id !== targetList.id) await this.writeListCardFiles(sourceList);
     await this.savePluginData();
     this.refreshViews();
+  }
+
+  // Rewrite the .md of every card in a list so their `position` frontmatter
+  // matches the list's current order.
+  async writeListCardFiles(list) {
+    for (const id of list.cardIds) {
+      const c = this.data.cards[id];
+      if (c) await this.writeCardFile(c);
+    }
   }
 
   async moveList(listId, targetListId, afterTarget = false) {
@@ -3759,6 +3807,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (parsed.completed !== null) card.completed = parsed.completed;
     if (parsed.startDate !== null) card.startDate = parsed.startDate;
     if (parsed.dueDate !== null) card.dueDate = parsed.dueDate;
+    if (parsed.position !== null) card.position = parsed.position;
     card.details = parsed.details;
     card.checklist = parsed.checklist;
   }
@@ -4025,12 +4074,17 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     await this.ensureBoardFolder(board);
     const list = this.findList(card.listId, board);
     const tags = await this.cardTags(card, this.taskDeckTag(board, list));
+    // Position within the list, from the live cardIds order. This is the ONLY
+    // place card order is persisted to a synced file (data.json order does not
+    // sync), so the other device can restore the same order.
+    const position = list ? list.cardIds.indexOf(card.id) : -1;
 
     const markdown = [
       "---",
       `kanban-card-id: ${card.id}`,
       `kanban-board-id: ${card.boardId || ""}`,
       `kanban-list-id: ${card.listId || ""}`,
+      `position: ${position >= 0 ? position : 0}`,
       this.tagFrontmatter(tags),
       `task-deck-board: ${this.frontmatterText(board && board.name)}`,
       `task-deck-list: ${this.frontmatterText(list && list.title)}`,

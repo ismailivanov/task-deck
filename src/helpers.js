@@ -437,11 +437,15 @@ function parseCardMarkdown(markdown) {
   const completed = frontmatterValue(markdown, "completed");
   const start = frontmatterValue(markdown, "start");
   const due = frontmatterValue(markdown, "due");
+  const positionRaw = frontmatterValue(markdown, "position");
+  const position = positionRaw !== null && positionRaw !== "" && !Number.isNaN(Number(positionRaw)) ? Number(positionRaw) : null;
 
   return {
     id: frontmatterValue(markdown, "kanban-card-id") || "",
     boardId: frontmatterValue(markdown, "kanban-board-id") || "",
     listId: frontmatterValue(markdown, "kanban-list-id") || "",
+    listTitle: frontmatterValue(markdown, "task-deck-list") || "",
+    position,
     title: titleMatch ? titleMatch[1].trim() : "",
     labels: labels !== null ? parseLabels(labels) : [],
     assignees: assignees !== null ? parseAssignees(assignees) : null,
