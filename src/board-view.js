@@ -421,6 +421,19 @@ class BoardView extends ItemView {
     }
   }
 
+  async syncNotes() {
+    // Same action as the About modal's "Sync notes": re-import every card from
+    // its Markdown note so changes synced by SyncDeck show up on the boards.
+    try {
+      new Notice("Syncing Task Deck notes...");
+      await this.plugin.syncCardsFromFolder();
+      this.plugin.refreshViews();
+      new Notice("Task Deck synced.");
+    } catch (error) {
+      new Notice(`Sync failed: ${error.message}`);
+    }
+  }
+
   renderBoardHome() {
     const welcome = createElement("section", "ot-welcome-panel");
     const welcomeCopy = createElement("div", "ot-welcome-copy");
@@ -431,6 +444,7 @@ class BoardView extends ItemView {
     const welcomeActions = createElement("div", "ot-welcome-actions");
     welcomeActions.append(
       textButton("plus", "Create board", () => this.plugin.createBoardPrompt()),
+      textButton("refresh-cw", "Sync", () => this.syncNotes()),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support developer", () => window.open(DONATION_URL, "_blank"))
     );
