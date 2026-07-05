@@ -383,6 +383,41 @@ function labelsToFrontmatter(labels) {
     .join(", ");
 }
 
+/**
+ * Card assignees serialize to "email|Name|#color, email2|Name2|#color2". Only the
+ * email is a stable key; name/color are cached so avatars render even without a
+ * live SyncDeck member list. The avatar picture is resolved live from SyncDeck.
+ */
+function parseAssignees(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const [email, name, color] = part.split("|").map((item) => (item || "").trim());
+      if (!email) return null;
+      return { email, name: name || email, color: color || "#8b5cf6" };
+    })
+    .filter(Boolean);
+}
+
+function assigneesToFrontmatter(assignees) {
+  return (assignees || [])
+    .filter((a) => a && a.email)
+    .map((a) => `${textLine(a.email)}|${textLine(a.name || a.email).replace(/[|,]/g, " ")}|${textLine(a.color || "#8b5cf6")}`)
+    .join(", ");
+}
+
+/** Two-letter uppercase initials for an avatar fallback (no picture). */
+function initials(nameOrEmail) {
+  const source = String(nameOrEmail || "").trim();
+  if (!source) return "?";
+  const namePart = source.includes("@") ? source.split("@")[0] : source;
+  const words = namePart.split(/[\s._-]+/).filter(Boolean);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return namePart.slice(0, 2).toUpperCase();
+}
+
 function frontmatterValue(markdown, key) {
   const match = markdown.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
   return match ? textLine(match[1]) : null;
@@ -398,6 +433,7 @@ function frontmatterValue(markdown, key) {
 function parseCardMarkdown(markdown) {
   const titleMatch = markdown.match(/^#\s+(.+)$/m);
   const labels = frontmatterValue(markdown, "labels");
+  const assignees = frontmatterValue(markdown, "assignees");
   const completed = frontmatterValue(markdown, "completed");
   const start = frontmatterValue(markdown, "start");
   const due = frontmatterValue(markdown, "due");
@@ -408,6 +444,7 @@ function parseCardMarkdown(markdown) {
     listId: frontmatterValue(markdown, "kanban-list-id") || "",
     title: titleMatch ? titleMatch[1].trim() : "",
     labels: labels !== null ? parseLabels(labels) : [],
+    assignees: assignees !== null ? parseAssignees(assignees) : null,
     completed: completed !== null ? parseBoolean(completed) : null,
     startDate: start !== null ? cleanDate(start) : null,
     dueDate: due !== null ? cleanDate(due) : null,
@@ -459,5 +496,8 @@ module.exports = {
   checklistStats,
   parseLabels,
   labelsToFrontmatter,
+  parseAssignees,
+  assigneesToFrontmatter,
+  initials,
   parseCardMarkdown,
 };

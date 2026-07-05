@@ -386,6 +386,41 @@ function labelsToFrontmatter(labels) {
     .join(", ");
 }
 
+/**
+ * Card assignees serialize to "email|Name|#color, email2|Name2|#color2". Only the
+ * email is a stable key; name/color are cached so avatars render even without a
+ * live SyncDeck member list. The avatar picture is resolved live from SyncDeck.
+ */
+function parseAssignees(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const [email, name, color] = part.split("|").map((item) => (item || "").trim());
+      if (!email) return null;
+      return { email, name: name || email, color: color || "#8b5cf6" };
+    })
+    .filter(Boolean);
+}
+
+function assigneesToFrontmatter(assignees) {
+  return (assignees || [])
+    .filter((a) => a && a.email)
+    .map((a) => `${textLine(a.email)}|${textLine(a.name || a.email).replace(/[|,]/g, " ")}|${textLine(a.color || "#8b5cf6")}`)
+    .join(", ");
+}
+
+/** Two-letter uppercase initials for an avatar fallback (no picture). */
+function initials(nameOrEmail) {
+  const source = String(nameOrEmail || "").trim();
+  if (!source) return "?";
+  const namePart = source.includes("@") ? source.split("@")[0] : source;
+  const words = namePart.split(/[\s._-]+/).filter(Boolean);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return namePart.slice(0, 2).toUpperCase();
+}
+
 function frontmatterValue(markdown, key) {
   const match = markdown.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
   return match ? textLine(match[1]) : null;
@@ -401,6 +436,7 @@ function frontmatterValue(markdown, key) {
 function parseCardMarkdown(markdown) {
   const titleMatch = markdown.match(/^#\s+(.+)$/m);
   const labels = frontmatterValue(markdown, "labels");
+  const assignees = frontmatterValue(markdown, "assignees");
   const completed = frontmatterValue(markdown, "completed");
   const start = frontmatterValue(markdown, "start");
   const due = frontmatterValue(markdown, "due");
@@ -411,6 +447,7 @@ function parseCardMarkdown(markdown) {
     listId: frontmatterValue(markdown, "kanban-list-id") || "",
     title: titleMatch ? titleMatch[1].trim() : "",
     labels: labels !== null ? parseLabels(labels) : [],
+    assignees: assignees !== null ? parseAssignees(assignees) : null,
     completed: completed !== null ? parseBoolean(completed) : null,
     startDate: start !== null ? cleanDate(start) : null,
     dueDate: due !== null ? cleanDate(due) : null,
@@ -462,12 +499,15 @@ module.exports = {
   checklistStats,
   parseLabels,
   labelsToFrontmatter,
+  parseAssignees,
+  assigneesToFrontmatter,
+  initials,
   parseCardMarkdown,
 };
 
   },
   "src/modals.js": function(module, exports, __require) {
-const { MarkdownRenderer, Modal, Notice, setIcon } = require("obsidian");
+const { MarkdownRenderer, Menu, Modal, Notice, setIcon } = require("obsidian");
 
 // Modal UIs for cards, labels, dates, prompts, and the short about panel.
 const {
@@ -489,6 +529,7 @@ const {
   labelKey,
   textButton,
   textLine,
+  initials,
 } = __require("src/helpers.js");
 
 /**
@@ -1139,6 +1180,7 @@ class CardModal extends Modal {
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
     this.localDetails = card.details || "";
     this.localChecklist = clone(card.checklist || []);
+    this.localAssignees = clone(card.assignees || []);
     await this.setupCardLock();
     this.render();
   }
@@ -1229,6 +1271,70 @@ class CardModal extends Modal {
     return this.localLabels.some((item) => labelKey(item) === key);
   }
 
+  renderAssigneesField() {
+    const field = createElement("div", "ot-field ot-assignee-editor");
+    field.append(createElement("span", "", "Members"));
+    const row = createElement("div", "ot-assignee-row");
+
+    const rebuild = () => {
+      row.replaceChildren();
+      (this.localAssignees || []).forEach((assignee) => {
+        const chip = createElement("span", "ot-assignee-chip");
+        const avatar = createElement("span", "ot-card-avatar");
+        avatar.style.setProperty("--ot-avatar-color", assignee.color || "#8b5cf6");
+        const picture = this.plugin.getMemberPicture(assignee.email);
+        if (picture) {
+          const img = createElement("img", "");
+          img.src = picture;
+          img.alt = "";
+          avatar.append(img);
+        } else {
+          avatar.textContent = initials(assignee.name || assignee.email);
+          avatar.classList.add("is-initials");
+        }
+        const remove = iconButton("x", "Remove member", () => {
+          this.localAssignees = (this.localAssignees || []).filter((a) => a.email !== assignee.email);
+          rebuild();
+          this.queueSave();
+        });
+        remove.classList.add("ot-assignee-remove");
+        chip.append(avatar, createElement("span", "ot-assignee-name", assignee.name || assignee.email), remove);
+        row.append(chip);
+      });
+      const addButton = iconButton("plus", "Assign a member", (event) => this.showMemberMenu(event, rebuild));
+      addButton.classList.add("ot-assignee-add");
+      row.append(addButton);
+    };
+
+    rebuild();
+    field.append(row);
+    return field;
+  }
+
+  showMemberMenu(event, rebuild) {
+    const members = this.plugin.getVaultMembers();
+    const menu = new Menu();
+    if (!members.length) {
+      menu.addItem((item) => item.setTitle("No members — sign in to SyncDeck").setDisabled(true));
+    } else {
+      members.forEach((member) => {
+        const assigned = (this.localAssignees || []).some((a) => a.email === member.email);
+        menu.addItem((item) => {
+          item.setTitle(member.name || member.email).setChecked(assigned).onClick(() => {
+            if (assigned) {
+              this.localAssignees = (this.localAssignees || []).filter((a) => a.email !== member.email);
+            } else {
+              this.localAssignees = [...(this.localAssignees || []), { email: member.email, name: member.name, color: member.color }];
+            }
+            rebuild();
+            this.queueSave();
+          });
+        });
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+
   render() {
     const card = this.card;
     this.contentEl.replaceChildren();
@@ -1244,6 +1350,7 @@ class CardModal extends Modal {
     });
 
     const labelsField = this.renderLabelsField();
+    const assigneesField = this.renderAssigneesField();
     const detailsField = this.renderDetailsField();
     const checklistField = this.renderChecklistField();
 
@@ -1278,7 +1385,7 @@ class CardModal extends Modal {
 
     actions.append(deleteButton, openNote, close);
 
-    const children = [title, labelsField, detailsField, checklistField, actions];
+    const children = [title, labelsField, assigneesField, detailsField, checklistField, actions];
     if (this.readOnly) {
       this.contentEl.addClass("ot-card-readonly");
       const holderName = (this.lockHolder && this.lockHolder.name) || "Someone";
@@ -1289,7 +1396,7 @@ class CardModal extends Modal {
     if (this.readOnly) {
       title.disabled = true;
       deleteButton.disabled = true;
-      this.disableEditing([labelsField, detailsField, checklistField]);
+      this.disableEditing([labelsField, assigneesField, detailsField, checklistField]);
     } else {
       requestAnimationFrame(() => title.focus());
     }
@@ -1547,6 +1654,7 @@ class CardModal extends Modal {
     return {
       title: textLine(this.localTitle) || this.card.title,
       labels: clone(this.localLabels),
+      assignees: clone(this.localAssignees || []),
       details: this.localDetails.trim(),
       checklist: this.localChecklist
         .map((item) => ({ done: !!item.done, text: textLine(item.text) }))
@@ -1609,6 +1717,7 @@ const {
   checklistStats,
   createElement,
   dateRangeLabel,
+  initials,
   hasDragType,
   iconButton,
   textButton,
@@ -2297,11 +2406,45 @@ class BoardView extends ItemView {
     element.append(main);
 
     const meta = this.renderCardMeta(card);
-    if (meta.childElementCount) element.append(meta);
+    const assignees = this.renderCardAssignees(card);
+    if (meta.childElementCount || assignees.childElementCount) {
+      const footer = createElement("div", "ot-card-footer");
+      footer.append(meta, assignees);
+      element.append(footer);
+    }
 
     if (lockedByOther) element.append(this.buildLockBadge(lockHolder));
 
     return element;
+  }
+
+  renderCardAssignees(card) {
+    const wrap = createElement("div", "ot-card-assignees");
+    const assignees = (card.assignees || []).filter((a) => a && a.email);
+    const max = 3;
+    assignees.slice(0, max).forEach((assignee) => wrap.append(this.buildAvatar(assignee)));
+    if (assignees.length > max) {
+      const more = createElement("span", "ot-card-avatar is-initials", `+${assignees.length - max}`);
+      wrap.append(more);
+    }
+    return wrap;
+  }
+
+  buildAvatar(assignee) {
+    const el = createElement("span", "ot-card-avatar");
+    el.style.setProperty("--ot-avatar-color", assignee.color || "#8b5cf6");
+    el.title = assignee.name || assignee.email;
+    const picture = this.plugin.getMemberPicture(assignee.email);
+    if (picture) {
+      const img = createElement("img", "");
+      img.src = picture;
+      img.alt = "";
+      el.append(img);
+    } else {
+      el.textContent = initials(assignee.name || assignee.email);
+      el.classList.add("is-initials");
+    }
+    return el;
   }
 
   buildLockBadge(holder) {
@@ -2579,6 +2722,7 @@ const {
   clone,
   labelKey,
   labelsToFrontmatter,
+  assigneesToFrontmatter,
   parseCardMarkdown,
   cardFileBaseName,
   taskDeckListTag,
@@ -2914,6 +3058,32 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return syncDeck;
   }
 
+  // Assignable users = the SyncDeck vault members. Empty when SyncDeck is not
+  // installed/signed in (the assignee UI then just shows nothing to assign).
+  getVaultMembers() {
+    const syncDeck = this.getSyncDeckPlugin();
+    const members = syncDeck && syncDeck.data && syncDeck.data.members;
+    if (!Array.isArray(members)) return [];
+    return members
+      .filter((m) => m && m.email)
+      .map((m) => ({ email: m.email, name: m.name || m.email, color: m.color || "#8b5cf6", picture: m.picture || "" }));
+  }
+
+  // The avatar picture for an assignee, resolved live from SyncDeck (not stored
+  // in the card frontmatter, since the URL can change/expire).
+  getMemberPicture(email) {
+    const member = this.getVaultMembers().find((m) => m.email === email);
+    return (member && member.picture) || "";
+  }
+
+  normalizeAssignees(assignees) {
+    const seen = new Set();
+    return (Array.isArray(assignees) ? assignees : [])
+      .filter((a) => a && a.email)
+      .filter((a) => (seen.has(a.email) ? false : seen.add(a.email)))
+      .map((a) => ({ email: String(a.email), name: a.name || a.email, color: a.color || "#8b5cf6" }));
+  }
+
   // Presence responses carry both the cursor roster (users) and the card-lock
   // roster (locks). Both helpers return { users, locks } on success, an empty
   // object-shaped roster when the bridge is unavailable (a real "nobody here"),
@@ -3191,6 +3361,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         title: parsed.title || file.basename,
         listId: targetList.id,
         labels: parsed.labels.length ? this.normalizeCardLabels(parsed.labels) : this.normalizeCardLabels(card.labels || []),
+        assignees: this.normalizeAssignees(parsed.assignees !== null ? parsed.assignees : card.assignees || []),
         details: parsed.details,
         checklist: parsed.checklist,
         completed: parsed.completed !== null ? parsed.completed : !!card.completed,
@@ -3392,6 +3563,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       title,
       listId,
       labels: [],
+      assignees: [],
       details: "",
       checklist: [],
       completed: false,
@@ -3418,6 +3590,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     if (globalLabels) this.data.labels = this.normalizeGlobalLabels(globalLabels);
     if (patch.labels) patch.labels = this.normalizeCardLabels(patch.labels);
+    if (Object.prototype.hasOwnProperty.call(patch, "assignees")) patch.assignees = this.normalizeAssignees(patch.assignees);
     if (Object.prototype.hasOwnProperty.call(patch, "completed")) patch.completed = !!patch.completed;
     if (Object.prototype.hasOwnProperty.call(patch, "startDate")) patch.startDate = cleanDate(patch.startDate);
     if (Object.prototype.hasOwnProperty.call(patch, "dueDate")) patch.dueDate = cleanDate(patch.dueDate);
@@ -3535,6 +3708,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const parsed = parseCardMarkdown(markdown);
     card.title = parsed.title || card.title;
     card.labels = parsed.labels.length ? this.normalizeCardLabels(parsed.labels) : this.normalizeCardLabels(card.labels || []);
+    if (parsed.assignees !== null) card.assignees = parsed.assignees;
     if (parsed.completed !== null) card.completed = parsed.completed;
     if (parsed.startDate !== null) card.startDate = parsed.startDate;
     if (parsed.dueDate !== null) card.dueDate = parsed.dueDate;
@@ -3815,6 +3989,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       `task-deck-list: ${this.frontmatterText(list && list.title)}`,
       `task-deck-list-color: ${this.frontmatterText(cleanColor(list && list.color))}`,
       `labels: ${labelsToFrontmatter(card.labels)}`,
+      `assignees: ${assigneesToFrontmatter(card.assignees)}`,
       `completed: ${card.completed ? "true" : "false"}`,
       `start: ${cleanDate(card.startDate)}`,
       `due: ${cleanDate(card.dueDate)}`,

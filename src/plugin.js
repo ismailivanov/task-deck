@@ -17,6 +17,7 @@ const {
   clone,
   labelKey,
   labelsToFrontmatter,
+  assigneesToFrontmatter,
   parseCardMarkdown,
   cardFileBaseName,
   taskDeckListTag,
@@ -352,6 +353,32 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return syncDeck;
   }
 
+  // Assignable users = the SyncDeck vault members. Empty when SyncDeck is not
+  // installed/signed in (the assignee UI then just shows nothing to assign).
+  getVaultMembers() {
+    const syncDeck = this.getSyncDeckPlugin();
+    const members = syncDeck && syncDeck.data && syncDeck.data.members;
+    if (!Array.isArray(members)) return [];
+    return members
+      .filter((m) => m && m.email)
+      .map((m) => ({ email: m.email, name: m.name || m.email, color: m.color || "#8b5cf6", picture: m.picture || "" }));
+  }
+
+  // The avatar picture for an assignee, resolved live from SyncDeck (not stored
+  // in the card frontmatter, since the URL can change/expire).
+  getMemberPicture(email) {
+    const member = this.getVaultMembers().find((m) => m.email === email);
+    return (member && member.picture) || "";
+  }
+
+  normalizeAssignees(assignees) {
+    const seen = new Set();
+    return (Array.isArray(assignees) ? assignees : [])
+      .filter((a) => a && a.email)
+      .filter((a) => (seen.has(a.email) ? false : seen.add(a.email)))
+      .map((a) => ({ email: String(a.email), name: a.name || a.email, color: a.color || "#8b5cf6" }));
+  }
+
   // Presence responses carry both the cursor roster (users) and the card-lock
   // roster (locks). Both helpers return { users, locks } on success, an empty
   // object-shaped roster when the bridge is unavailable (a real "nobody here"),
@@ -629,6 +656,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         title: parsed.title || file.basename,
         listId: targetList.id,
         labels: parsed.labels.length ? this.normalizeCardLabels(parsed.labels) : this.normalizeCardLabels(card.labels || []),
+        assignees: this.normalizeAssignees(parsed.assignees !== null ? parsed.assignees : card.assignees || []),
         details: parsed.details,
         checklist: parsed.checklist,
         completed: parsed.completed !== null ? parsed.completed : !!card.completed,
@@ -830,6 +858,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       title,
       listId,
       labels: [],
+      assignees: [],
       details: "",
       checklist: [],
       completed: false,
@@ -856,6 +885,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     if (globalLabels) this.data.labels = this.normalizeGlobalLabels(globalLabels);
     if (patch.labels) patch.labels = this.normalizeCardLabels(patch.labels);
+    if (Object.prototype.hasOwnProperty.call(patch, "assignees")) patch.assignees = this.normalizeAssignees(patch.assignees);
     if (Object.prototype.hasOwnProperty.call(patch, "completed")) patch.completed = !!patch.completed;
     if (Object.prototype.hasOwnProperty.call(patch, "startDate")) patch.startDate = cleanDate(patch.startDate);
     if (Object.prototype.hasOwnProperty.call(patch, "dueDate")) patch.dueDate = cleanDate(patch.dueDate);
@@ -973,6 +1003,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const parsed = parseCardMarkdown(markdown);
     card.title = parsed.title || card.title;
     card.labels = parsed.labels.length ? this.normalizeCardLabels(parsed.labels) : this.normalizeCardLabels(card.labels || []);
+    if (parsed.assignees !== null) card.assignees = parsed.assignees;
     if (parsed.completed !== null) card.completed = parsed.completed;
     if (parsed.startDate !== null) card.startDate = parsed.startDate;
     if (parsed.dueDate !== null) card.dueDate = parsed.dueDate;
@@ -1253,6 +1284,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       `task-deck-list: ${this.frontmatterText(list && list.title)}`,
       `task-deck-list-color: ${this.frontmatterText(cleanColor(list && list.color))}`,
       `labels: ${labelsToFrontmatter(card.labels)}`,
+      `assignees: ${assigneesToFrontmatter(card.assignees)}`,
       `completed: ${card.completed ? "true" : "false"}`,
       `start: ${cleanDate(card.startDate)}`,
       `due: ${cleanDate(card.dueDate)}`,

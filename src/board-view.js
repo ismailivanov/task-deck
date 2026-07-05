@@ -10,6 +10,7 @@ const {
   checklistStats,
   createElement,
   dateRangeLabel,
+  initials,
   hasDragType,
   iconButton,
   textButton,
@@ -698,11 +699,45 @@ class BoardView extends ItemView {
     element.append(main);
 
     const meta = this.renderCardMeta(card);
-    if (meta.childElementCount) element.append(meta);
+    const assignees = this.renderCardAssignees(card);
+    if (meta.childElementCount || assignees.childElementCount) {
+      const footer = createElement("div", "ot-card-footer");
+      footer.append(meta, assignees);
+      element.append(footer);
+    }
 
     if (lockedByOther) element.append(this.buildLockBadge(lockHolder));
 
     return element;
+  }
+
+  renderCardAssignees(card) {
+    const wrap = createElement("div", "ot-card-assignees");
+    const assignees = (card.assignees || []).filter((a) => a && a.email);
+    const max = 3;
+    assignees.slice(0, max).forEach((assignee) => wrap.append(this.buildAvatar(assignee)));
+    if (assignees.length > max) {
+      const more = createElement("span", "ot-card-avatar is-initials", `+${assignees.length - max}`);
+      wrap.append(more);
+    }
+    return wrap;
+  }
+
+  buildAvatar(assignee) {
+    const el = createElement("span", "ot-card-avatar");
+    el.style.setProperty("--ot-avatar-color", assignee.color || "#8b5cf6");
+    el.title = assignee.name || assignee.email;
+    const picture = this.plugin.getMemberPicture(assignee.email);
+    if (picture) {
+      const img = createElement("img", "");
+      img.src = picture;
+      img.alt = "";
+      el.append(img);
+    } else {
+      el.textContent = initials(assignee.name || assignee.email);
+      el.classList.add("is-initials");
+    }
+    return el;
   }
 
   buildLockBadge(holder) {

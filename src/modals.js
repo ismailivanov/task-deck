@@ -1,4 +1,4 @@
-const { MarkdownRenderer, Modal, Notice, setIcon } = require("obsidian");
+const { MarkdownRenderer, Menu, Modal, Notice, setIcon } = require("obsidian");
 
 // Modal UIs for cards, labels, dates, prompts, and the short about panel.
 const {
@@ -20,6 +20,7 @@ const {
   labelKey,
   textButton,
   textLine,
+  initials,
 } = require("./helpers");
 
 /**
@@ -670,6 +671,7 @@ class CardModal extends Modal {
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
     this.localDetails = card.details || "";
     this.localChecklist = clone(card.checklist || []);
+    this.localAssignees = clone(card.assignees || []);
     await this.setupCardLock();
     this.render();
   }
@@ -760,6 +762,70 @@ class CardModal extends Modal {
     return this.localLabels.some((item) => labelKey(item) === key);
   }
 
+  renderAssigneesField() {
+    const field = createElement("div", "ot-field ot-assignee-editor");
+    field.append(createElement("span", "", "Members"));
+    const row = createElement("div", "ot-assignee-row");
+
+    const rebuild = () => {
+      row.replaceChildren();
+      (this.localAssignees || []).forEach((assignee) => {
+        const chip = createElement("span", "ot-assignee-chip");
+        const avatar = createElement("span", "ot-card-avatar");
+        avatar.style.setProperty("--ot-avatar-color", assignee.color || "#8b5cf6");
+        const picture = this.plugin.getMemberPicture(assignee.email);
+        if (picture) {
+          const img = createElement("img", "");
+          img.src = picture;
+          img.alt = "";
+          avatar.append(img);
+        } else {
+          avatar.textContent = initials(assignee.name || assignee.email);
+          avatar.classList.add("is-initials");
+        }
+        const remove = iconButton("x", "Remove member", () => {
+          this.localAssignees = (this.localAssignees || []).filter((a) => a.email !== assignee.email);
+          rebuild();
+          this.queueSave();
+        });
+        remove.classList.add("ot-assignee-remove");
+        chip.append(avatar, createElement("span", "ot-assignee-name", assignee.name || assignee.email), remove);
+        row.append(chip);
+      });
+      const addButton = iconButton("plus", "Assign a member", (event) => this.showMemberMenu(event, rebuild));
+      addButton.classList.add("ot-assignee-add");
+      row.append(addButton);
+    };
+
+    rebuild();
+    field.append(row);
+    return field;
+  }
+
+  showMemberMenu(event, rebuild) {
+    const members = this.plugin.getVaultMembers();
+    const menu = new Menu();
+    if (!members.length) {
+      menu.addItem((item) => item.setTitle("No members — sign in to SyncDeck").setDisabled(true));
+    } else {
+      members.forEach((member) => {
+        const assigned = (this.localAssignees || []).some((a) => a.email === member.email);
+        menu.addItem((item) => {
+          item.setTitle(member.name || member.email).setChecked(assigned).onClick(() => {
+            if (assigned) {
+              this.localAssignees = (this.localAssignees || []).filter((a) => a.email !== member.email);
+            } else {
+              this.localAssignees = [...(this.localAssignees || []), { email: member.email, name: member.name, color: member.color }];
+            }
+            rebuild();
+            this.queueSave();
+          });
+        });
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+
   render() {
     const card = this.card;
     this.contentEl.replaceChildren();
@@ -775,6 +841,7 @@ class CardModal extends Modal {
     });
 
     const labelsField = this.renderLabelsField();
+    const assigneesField = this.renderAssigneesField();
     const detailsField = this.renderDetailsField();
     const checklistField = this.renderChecklistField();
 
@@ -809,7 +876,7 @@ class CardModal extends Modal {
 
     actions.append(deleteButton, openNote, close);
 
-    const children = [title, labelsField, detailsField, checklistField, actions];
+    const children = [title, labelsField, assigneesField, detailsField, checklistField, actions];
     if (this.readOnly) {
       this.contentEl.addClass("ot-card-readonly");
       const holderName = (this.lockHolder && this.lockHolder.name) || "Someone";
@@ -820,7 +887,7 @@ class CardModal extends Modal {
     if (this.readOnly) {
       title.disabled = true;
       deleteButton.disabled = true;
-      this.disableEditing([labelsField, detailsField, checklistField]);
+      this.disableEditing([labelsField, assigneesField, detailsField, checklistField]);
     } else {
       requestAnimationFrame(() => title.focus());
     }
@@ -1078,6 +1145,7 @@ class CardModal extends Modal {
     return {
       title: textLine(this.localTitle) || this.card.title,
       labels: clone(this.localLabels),
+      assignees: clone(this.localAssignees || []),
       details: this.localDetails.trim(),
       checklist: this.localChecklist
         .map((item) => ({ done: !!item.done, text: textLine(item.text) }))
