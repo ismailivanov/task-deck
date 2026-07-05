@@ -1104,6 +1104,11 @@ class CardModal extends Modal {
     this.addingChecklistItem = false;
     this.saveTimer = null;
     this.savePromise = Promise.resolve();
+    this.readOnly = false;
+    this.lockHolder = null;
+    this.lockAcquired = false;
+    this.lockBoardId = null;
+    this.lockHeartbeat = null;
   }
 
   onOpen() {
@@ -1134,7 +1139,73 @@ class CardModal extends Modal {
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
     this.localDetails = card.details || "";
     this.localChecklist = clone(card.checklist || []);
+    await this.setupCardLock();
     this.render();
+  }
+
+  /**
+   * Decide whether this card can be edited. If someone else already holds the
+   * lock we open read-only; otherwise we take the lock and keep it warm with a
+   * heartbeat until the modal closes. Offline / no-SyncDeck falls open (editable).
+   */
+  async setupCardLock() {
+    const board = this.plugin.getBoard();
+    this.lockBoardId = board && board.id;
+
+    const holder = this.plugin.getCardLockHolder && this.plugin.getCardLockHolder(this.cardId);
+    if (holder) {
+      this.readOnly = true;
+      this.lockHolder = holder;
+      return;
+    }
+    if (!this.lockBoardId || !this.plugin.acquireCardLock) return;
+
+    const result = await this.plugin.acquireCardLock(this.lockBoardId, this.cardId);
+    if (result && result.ok === false) {
+      this.readOnly = true;
+      this.lockHolder = result.lock || null;
+      return;
+    }
+    this.lockAcquired = !!(result && result.ok && !result.offline);
+    this.plugin.editingCardId = this.cardId;
+    this.startLockHeartbeat();
+  }
+
+  startLockHeartbeat() {
+    this.stopLockHeartbeat();
+    // Re-take the lock well within its server TTL so it never lapses mid-edit.
+    // If the server now reports someone else holds it (we opened while offline,
+    // or another editor took over), drop this modal to read-only.
+    this.lockHeartbeat = window.setInterval(async () => {
+      if (!this.lockBoardId || this.readOnly) return;
+      const result = await this.plugin.acquireCardLock(this.lockBoardId, this.cardId).catch(() => null);
+      if (result && result.ok === false) this.enterReadOnly(result.lock);
+    }, 5000);
+  }
+
+  // Convert an open editable modal into a read-only view after losing the lock.
+  // Unsaved edits are dropped rather than saved, so we never persist a write that
+  // would conflict with the real editor's changes.
+  enterReadOnly(holder) {
+    if (this.readOnly) return;
+    this.readOnly = true;
+    this.lockHolder = holder || this.lockHolder;
+    this.lockAcquired = false;
+    if (this.saveTimer) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.stopLockHeartbeat();
+    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
+    new Notice(`🔒 ${(holder && holder.name) || "Someone"} is editing this card`);
+    this.render();
+  }
+
+  stopLockHeartbeat() {
+    if (this.lockHeartbeat) {
+      window.clearInterval(this.lockHeartbeat);
+      this.lockHeartbeat = null;
+    }
   }
 
   /**
@@ -1207,11 +1278,44 @@ class CardModal extends Modal {
 
     actions.append(deleteButton, openNote, close);
 
-    this.contentEl.append(title, labelsField, detailsField, checklistField, actions);
-    requestAnimationFrame(() => title.focus());
+    const children = [title, labelsField, detailsField, checklistField, actions];
+    if (this.readOnly) {
+      this.contentEl.addClass("ot-card-readonly");
+      const holderName = (this.lockHolder && this.lockHolder.name) || "Someone";
+      children.unshift(createElement("div", "ot-card-lock-banner", `🔒 ${holderName} is editing this card — read only`));
+    }
+    this.contentEl.append(...children);
+
+    if (this.readOnly) {
+      title.disabled = true;
+      deleteButton.disabled = true;
+      this.disableEditing([labelsField, detailsField, checklistField]);
+    } else {
+      requestAnimationFrame(() => title.focus());
+    }
+  }
+
+  // Freeze every editable control inside the given fields so a read-only viewer
+  // can look but not change anything (Open note / Close stay usable).
+  disableEditing(fields) {
+    fields.forEach((field) => {
+      field.querySelectorAll("input, textarea, button, [contenteditable]").forEach((el) => {
+        if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "BUTTON") {
+          el.disabled = true;
+        } else {
+          el.setAttribute("contenteditable", "false");
+        }
+        el.classList.add("is-disabled");
+      });
+    });
   }
 
   onClose() {
+    this.stopLockHeartbeat();
+    if (!this.readOnly && this.lockBoardId && this.plugin.releaseCardLock) {
+      this.plugin.releaseCardLock(this.lockBoardId, this.cardId).catch(() => {});
+    }
+    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
     if (this.saveTimer) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -1451,6 +1555,7 @@ class CardModal extends Modal {
   }
 
   queueSave() {
+    if (this.readOnly) return;
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
@@ -1463,6 +1568,7 @@ class CardModal extends Modal {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    if (this.readOnly) return;
 
     const card = this.card;
     if (!card) return;
@@ -1491,7 +1597,7 @@ module.exports = {
 
   },
   "src/board-view.js": function(module, exports, __require) {
-const { ItemView, Menu, setIcon } = require("obsidian");
+const { ItemView, Menu, Notice, setIcon } = require("obsidian");
 
 // Renders the kanban board and handles inline card/list interactions.
 const {
@@ -1610,6 +1716,10 @@ class BoardView extends ItemView {
     // no-ops if it no longer matches, so a stale response can never touch live state.
     this.presenceGen = (this.presenceGen || 0) + 1;
     const gen = this.presenceGen;
+    // Board-owned copy of the lock roster used purely as the badge-diff baseline.
+    // It must NOT be plugin.cardLocks, which an open card modal rewrites out of
+    // band (acquire/release/heartbeat) and would desync the diff into ghost badges.
+    this.lockUiState = new Map(this.plugin.cardLocks || []);
     if (!this.presenceTickBound) this.presenceTickBound = (now) => this.presenceTick(now);
 
     this.presenceLayer = createElement("div", "ot-presence-layer");
@@ -1651,6 +1761,7 @@ class BoardView extends ItemView {
     this.presenceBoard = null;
     this.presencePoint = null;
     this.presenceUsers = null;
+    this.lockUiState = null;
     this.presenceSendInFlight = false;
     this.presenceDirty = false;
   }
@@ -1688,7 +1799,7 @@ class BoardView extends ItemView {
     this.presenceDirty = false;
     this.presenceSendInFlight = true;
     this.plugin.sendBoardPresence(this.presenceBoard, this.presencePoint)
-      .then((users) => this.applyPresenceSnapshot(users, gen))
+      .then((result) => this.applyPresenceResult(result, gen))
       .catch(() => {})
       .finally(() => {
         if (gen !== this.presenceGen) return; // superseded session: leave the new one untouched
@@ -1715,9 +1826,57 @@ class BoardView extends ItemView {
       return;
     }
     this.plugin.fetchBoardPresence(this.presenceBoard.id)
-      .then((users) => this.applyPresenceSnapshot(users, gen))
+      .then((result) => this.applyPresenceResult(result, gen))
       .catch(() => {})
       .finally(() => this.schedulePresencePoll(gen));
+  }
+
+  // Split a presence response into its cursor roster and card-lock roster. A
+  // null result means a transient error: keep both rosters as-is (no flicker).
+  applyPresenceResult(result, gen) {
+    if (gen !== this.presenceGen) return;
+    if (!result || !Array.isArray(result.users)) return;
+    this.applyPresenceSnapshot(result.users, gen);
+    this.applyLockSnapshot(Array.isArray(result.locks) ? result.locks : [], gen);
+  }
+
+  // Reconcile the card-lock roster into the plugin's lock map, then patch only
+  // the cards whose lock state changed so the board is not fully re-rendered.
+  applyLockSnapshot(locks, gen) {
+    if (gen !== this.presenceGen) return;
+    // Keep the plugin's map fresh for the card modal, but diff against our own
+    // board-owned baseline so out-of-band modal writes cannot create ghost badges.
+    this.plugin.setCardLocks(locks);
+    const before = this.lockUiState || new Map();
+    const after = new Map();
+    (locks || []).forEach((lock) => {
+      if (lock && lock.cardId) after.set(lock.cardId, lock);
+    });
+
+    const touched = new Set(before.keys());
+    after.forEach((_value, cardId) => touched.add(cardId));
+    touched.forEach((cardId) => {
+      const beforeHolder = before.get(cardId) || null;
+      const afterHolder = after.get(cardId) || null;
+      const beforeEmail = beforeHolder && beforeHolder.email;
+      const afterEmail = afterHolder && afterHolder.email;
+      if (beforeEmail !== afterEmail || (beforeHolder && beforeHolder.name) !== (afterHolder && afterHolder.name)) {
+        this.applyCardLockUi(cardId, afterHolder);
+      }
+    });
+    this.lockUiState = after;
+  }
+
+  // Add/update/remove the lock overlay on a single card element in place.
+  applyCardLockUi(cardId, holder) {
+    if (!this.contentEl) return;
+    const card = this.contentEl.querySelector(`.ot-card[data-card-id="${CSS.escape(cardId)}"]`);
+    if (!card) return;
+    card.classList.toggle("is-locked", !!holder);
+    card.draggable = !holder && this.editingCardId !== cardId;
+    const badge = card.querySelector(".ot-card-lock");
+    if (badge) badge.remove();
+    if (holder) card.append(this.buildLockBadge(holder));
   }
 
   // Reconcile the incoming roster against the live cursor elements: update
@@ -2065,8 +2224,11 @@ class BoardView extends ItemView {
   renderCard(card, list) {
     const element = createElement("article", "ot-card");
     const isRenaming = this.editingCardId === card.id;
-    element.draggable = !isRenaming;
+    const lockHolder = this.plugin.getCardLockHolder(card.id);
+    const lockedByOther = !!lockHolder;
+    element.draggable = !isRenaming && !lockedByOther;
     element.dataset.cardId = card.id;
+    if (lockedByOther) element.classList.add("is-locked");
     if (card.completed) element.classList.add("is-completed");
     if (card.completed && this.plugin.completedAnimationCardId === card.id) {
       element.classList.add("is-just-completed");
@@ -2108,6 +2270,7 @@ class BoardView extends ItemView {
 
     const completeButton = iconButton(card.completed ? "check" : "circle", card.completed ? "Mark as incomplete" : "Mark as complete", async (event) => {
       event.stopPropagation();
+      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       await this.plugin.toggleCardCompleted(card.id);
     });
     completeButton.classList.add("ot-card-complete-toggle");
@@ -2118,6 +2281,7 @@ class BoardView extends ItemView {
     const title = isRenaming ? this.renderCardTitleEditor(card) : createElement("div", "ot-card-title", card.title);
     const editButton = iconButton("pencil", "Edit card", (event) => {
       event.stopPropagation();
+      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       this.editingCardId = card.id;
       this.showCardMenu(event, card);
       this.render();
@@ -2135,7 +2299,21 @@ class BoardView extends ItemView {
     const meta = this.renderCardMeta(card);
     if (meta.childElementCount) element.append(meta);
 
+    if (lockedByOther) element.append(this.buildLockBadge(lockHolder));
+
     return element;
+  }
+
+  buildLockBadge(holder) {
+    const badge = createElement("span", "ot-card-lock");
+    badge.style.setProperty("--ot-lock-color", (holder && holder.color) || "#f59e0b");
+    badge.append(createElement("span", "", `🔒 ${(holder && holder.name) || "Someone"}`));
+    badge.title = `${(holder && holder.name) || "Someone"} is editing this card`;
+    return badge;
+  }
+
+  notifyCardLocked(holder) {
+    new Notice(`🔒 ${(holder && holder.name) || "Someone"} is editing this card`);
   }
 
   /**
@@ -2422,6 +2600,11 @@ const { TaskDeckSettingTab } = __require("src/settings-tab.js");
 module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async onload() {
     await this.loadPluginData();
+
+    // Live "someone else is editing this card" locks, keyed by card id. Filled
+    // from the SyncDeck presence roster; read by the board and the card modal.
+    this.cardLocks = new Map();
+    this.editingCardId = null;
 
     addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
@@ -2731,9 +2914,13 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return syncDeck;
   }
 
+  // Presence responses carry both the cursor roster (users) and the card-lock
+  // roster (locks). Both helpers return { users, locks } on success, an empty
+  // object-shaped roster when the bridge is unavailable (a real "nobody here"),
+  // or null on a transient error so callers keep their last known state.
   async sendBoardPresence(board, point) {
     const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !board || !point) return [];
+    if (!syncDeck || !board || !point) return { users: [], locks: [] };
 
     try {
       const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence`, {
@@ -2746,25 +2933,71 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
           color: syncDeck.data.user.color || "#8b5cf6",
         },
       });
-      return Array.isArray(result.users) ? result.users : [];
+      return { users: result.users || [], locks: result.locks || [] };
     } catch (error) {
-      // null (not []) signals a transient failure so the caller keeps the last
-      // known roster instead of flickering every cursor off. An unavailable
-      // bridge above returns [] because that is a real "nobody is present".
       return null;
     }
   }
 
   async fetchBoardPresence(boardId) {
     const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !boardId) return [];
+    if (!syncDeck || !boardId) return { users: [], locks: [] };
 
     try {
       const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardId)}`);
-      return Array.isArray(result.users) ? result.users : [];
+      return { users: result.users || [], locks: result.locks || [] };
     } catch (error) {
       return null;
     }
+  }
+
+  // Card edit locks ---------------------------------------------------------
+
+  async postCardLock(boardId, cardId, action) {
+    const syncDeck = this.getSyncDeckBridge();
+    if (!syncDeck || !boardId || !cardId) return null;
+    try {
+      return await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/lock`, {
+        method: "POST",
+        body: {
+          boardId,
+          cardId,
+          action,
+          color: syncDeck.data.user.color || "#8b5cf6",
+        },
+      });
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Try to take the lock for a card. Returns { ok, lock } — ok:false means
+  // someone else holds it (lock describes the holder). null means offline: we
+  // fail open so a server hiccup never blocks local editing.
+  async acquireCardLock(boardId, cardId) {
+    const result = await this.postCardLock(boardId, cardId, "acquire");
+    if (!result) return { ok: true, offline: true };
+    if (Array.isArray(result.locks)) this.setCardLocks(result.locks);
+    return result;
+  }
+
+  async releaseCardLock(boardId, cardId) {
+    const result = await this.postCardLock(boardId, cardId, "release");
+    if (result && Array.isArray(result.locks)) this.setCardLocks(result.locks);
+    return result;
+  }
+
+  setCardLocks(locks) {
+    const next = new Map();
+    (locks || []).forEach((lock) => {
+      if (lock && lock.cardId) next.set(lock.cardId, lock);
+    });
+    this.cardLocks = next;
+  }
+
+  // The holder if this card is being edited by someone else, otherwise null.
+  getCardLockHolder(cardId) {
+    return (this.cardLocks && this.cardLocks.get(cardId)) || null;
   }
 
   updateExplorerColors() {

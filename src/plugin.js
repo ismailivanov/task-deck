@@ -39,6 +39,11 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async onload() {
     await this.loadPluginData();
 
+    // Live "someone else is editing this card" locks, keyed by card id. Filled
+    // from the SyncDeck presence roster; read by the board and the card modal.
+    this.cardLocks = new Map();
+    this.editingCardId = null;
+
     addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
@@ -347,9 +352,13 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return syncDeck;
   }
 
+  // Presence responses carry both the cursor roster (users) and the card-lock
+  // roster (locks). Both helpers return { users, locks } on success, an empty
+  // object-shaped roster when the bridge is unavailable (a real "nobody here"),
+  // or null on a transient error so callers keep their last known state.
   async sendBoardPresence(board, point) {
     const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !board || !point) return [];
+    if (!syncDeck || !board || !point) return { users: [], locks: [] };
 
     try {
       const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence`, {
@@ -362,25 +371,71 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
           color: syncDeck.data.user.color || "#8b5cf6",
         },
       });
-      return Array.isArray(result.users) ? result.users : [];
+      return { users: result.users || [], locks: result.locks || [] };
     } catch (error) {
-      // null (not []) signals a transient failure so the caller keeps the last
-      // known roster instead of flickering every cursor off. An unavailable
-      // bridge above returns [] because that is a real "nobody is present".
       return null;
     }
   }
 
   async fetchBoardPresence(boardId) {
     const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !boardId) return [];
+    if (!syncDeck || !boardId) return { users: [], locks: [] };
 
     try {
       const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardId)}`);
-      return Array.isArray(result.users) ? result.users : [];
+      return { users: result.users || [], locks: result.locks || [] };
     } catch (error) {
       return null;
     }
+  }
+
+  // Card edit locks ---------------------------------------------------------
+
+  async postCardLock(boardId, cardId, action) {
+    const syncDeck = this.getSyncDeckBridge();
+    if (!syncDeck || !boardId || !cardId) return null;
+    try {
+      return await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/lock`, {
+        method: "POST",
+        body: {
+          boardId,
+          cardId,
+          action,
+          color: syncDeck.data.user.color || "#8b5cf6",
+        },
+      });
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Try to take the lock for a card. Returns { ok, lock } — ok:false means
+  // someone else holds it (lock describes the holder). null means offline: we
+  // fail open so a server hiccup never blocks local editing.
+  async acquireCardLock(boardId, cardId) {
+    const result = await this.postCardLock(boardId, cardId, "acquire");
+    if (!result) return { ok: true, offline: true };
+    if (Array.isArray(result.locks)) this.setCardLocks(result.locks);
+    return result;
+  }
+
+  async releaseCardLock(boardId, cardId) {
+    const result = await this.postCardLock(boardId, cardId, "release");
+    if (result && Array.isArray(result.locks)) this.setCardLocks(result.locks);
+    return result;
+  }
+
+  setCardLocks(locks) {
+    const next = new Map();
+    (locks || []).forEach((lock) => {
+      if (lock && lock.cardId) next.set(lock.cardId, lock);
+    });
+    this.cardLocks = next;
+  }
+
+  // The holder if this card is being edited by someone else, otherwise null.
+  getCardLockHolder(cardId) {
+    return (this.cardLocks && this.cardLocks.get(cardId)) || null;
   }
 
   updateExplorerColors() {

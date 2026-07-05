@@ -1,4 +1,4 @@
-const { ItemView, Menu, setIcon } = require("obsidian");
+const { ItemView, Menu, Notice, setIcon } = require("obsidian");
 
 // Renders the kanban board and handles inline card/list interactions.
 const {
@@ -117,6 +117,10 @@ class BoardView extends ItemView {
     // no-ops if it no longer matches, so a stale response can never touch live state.
     this.presenceGen = (this.presenceGen || 0) + 1;
     const gen = this.presenceGen;
+    // Board-owned copy of the lock roster used purely as the badge-diff baseline.
+    // It must NOT be plugin.cardLocks, which an open card modal rewrites out of
+    // band (acquire/release/heartbeat) and would desync the diff into ghost badges.
+    this.lockUiState = new Map(this.plugin.cardLocks || []);
     if (!this.presenceTickBound) this.presenceTickBound = (now) => this.presenceTick(now);
 
     this.presenceLayer = createElement("div", "ot-presence-layer");
@@ -158,6 +162,7 @@ class BoardView extends ItemView {
     this.presenceBoard = null;
     this.presencePoint = null;
     this.presenceUsers = null;
+    this.lockUiState = null;
     this.presenceSendInFlight = false;
     this.presenceDirty = false;
   }
@@ -195,7 +200,7 @@ class BoardView extends ItemView {
     this.presenceDirty = false;
     this.presenceSendInFlight = true;
     this.plugin.sendBoardPresence(this.presenceBoard, this.presencePoint)
-      .then((users) => this.applyPresenceSnapshot(users, gen))
+      .then((result) => this.applyPresenceResult(result, gen))
       .catch(() => {})
       .finally(() => {
         if (gen !== this.presenceGen) return; // superseded session: leave the new one untouched
@@ -222,9 +227,57 @@ class BoardView extends ItemView {
       return;
     }
     this.plugin.fetchBoardPresence(this.presenceBoard.id)
-      .then((users) => this.applyPresenceSnapshot(users, gen))
+      .then((result) => this.applyPresenceResult(result, gen))
       .catch(() => {})
       .finally(() => this.schedulePresencePoll(gen));
+  }
+
+  // Split a presence response into its cursor roster and card-lock roster. A
+  // null result means a transient error: keep both rosters as-is (no flicker).
+  applyPresenceResult(result, gen) {
+    if (gen !== this.presenceGen) return;
+    if (!result || !Array.isArray(result.users)) return;
+    this.applyPresenceSnapshot(result.users, gen);
+    this.applyLockSnapshot(Array.isArray(result.locks) ? result.locks : [], gen);
+  }
+
+  // Reconcile the card-lock roster into the plugin's lock map, then patch only
+  // the cards whose lock state changed so the board is not fully re-rendered.
+  applyLockSnapshot(locks, gen) {
+    if (gen !== this.presenceGen) return;
+    // Keep the plugin's map fresh for the card modal, but diff against our own
+    // board-owned baseline so out-of-band modal writes cannot create ghost badges.
+    this.plugin.setCardLocks(locks);
+    const before = this.lockUiState || new Map();
+    const after = new Map();
+    (locks || []).forEach((lock) => {
+      if (lock && lock.cardId) after.set(lock.cardId, lock);
+    });
+
+    const touched = new Set(before.keys());
+    after.forEach((_value, cardId) => touched.add(cardId));
+    touched.forEach((cardId) => {
+      const beforeHolder = before.get(cardId) || null;
+      const afterHolder = after.get(cardId) || null;
+      const beforeEmail = beforeHolder && beforeHolder.email;
+      const afterEmail = afterHolder && afterHolder.email;
+      if (beforeEmail !== afterEmail || (beforeHolder && beforeHolder.name) !== (afterHolder && afterHolder.name)) {
+        this.applyCardLockUi(cardId, afterHolder);
+      }
+    });
+    this.lockUiState = after;
+  }
+
+  // Add/update/remove the lock overlay on a single card element in place.
+  applyCardLockUi(cardId, holder) {
+    if (!this.contentEl) return;
+    const card = this.contentEl.querySelector(`.ot-card[data-card-id="${CSS.escape(cardId)}"]`);
+    if (!card) return;
+    card.classList.toggle("is-locked", !!holder);
+    card.draggable = !holder && this.editingCardId !== cardId;
+    const badge = card.querySelector(".ot-card-lock");
+    if (badge) badge.remove();
+    if (holder) card.append(this.buildLockBadge(holder));
   }
 
   // Reconcile the incoming roster against the live cursor elements: update
@@ -572,8 +625,11 @@ class BoardView extends ItemView {
   renderCard(card, list) {
     const element = createElement("article", "ot-card");
     const isRenaming = this.editingCardId === card.id;
-    element.draggable = !isRenaming;
+    const lockHolder = this.plugin.getCardLockHolder(card.id);
+    const lockedByOther = !!lockHolder;
+    element.draggable = !isRenaming && !lockedByOther;
     element.dataset.cardId = card.id;
+    if (lockedByOther) element.classList.add("is-locked");
     if (card.completed) element.classList.add("is-completed");
     if (card.completed && this.plugin.completedAnimationCardId === card.id) {
       element.classList.add("is-just-completed");
@@ -615,6 +671,7 @@ class BoardView extends ItemView {
 
     const completeButton = iconButton(card.completed ? "check" : "circle", card.completed ? "Mark as incomplete" : "Mark as complete", async (event) => {
       event.stopPropagation();
+      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       await this.plugin.toggleCardCompleted(card.id);
     });
     completeButton.classList.add("ot-card-complete-toggle");
@@ -625,6 +682,7 @@ class BoardView extends ItemView {
     const title = isRenaming ? this.renderCardTitleEditor(card) : createElement("div", "ot-card-title", card.title);
     const editButton = iconButton("pencil", "Edit card", (event) => {
       event.stopPropagation();
+      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       this.editingCardId = card.id;
       this.showCardMenu(event, card);
       this.render();
@@ -642,7 +700,21 @@ class BoardView extends ItemView {
     const meta = this.renderCardMeta(card);
     if (meta.childElementCount) element.append(meta);
 
+    if (lockedByOther) element.append(this.buildLockBadge(lockHolder));
+
     return element;
+  }
+
+  buildLockBadge(holder) {
+    const badge = createElement("span", "ot-card-lock");
+    badge.style.setProperty("--ot-lock-color", (holder && holder.color) || "#f59e0b");
+    badge.append(createElement("span", "", `🔒 ${(holder && holder.name) || "Someone"}`));
+    badge.title = `${(holder && holder.name) || "Someone"} is editing this card`;
+    return badge;
+  }
+
+  notifyCardLocked(holder) {
+    new Notice(`🔒 ${(holder && holder.name) || "Someone"} is editing this card`);
   }
 
   /**

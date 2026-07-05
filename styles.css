@@ -9,6 +9,46 @@
   background: var(--background-primary);
 }
 
+.ot-card.is-locked {
+  outline: 1.5px solid var(--ot-lock-color, #f59e0b);
+  outline-offset: -1px;
+  opacity: 0.9;
+  cursor: default;
+}
+
+.ot-card-lock {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #17130a;
+  background: var(--ot-lock-color, #f59e0b);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.ot-card-lock-banner {
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  color: #17130a;
+  background: #f59e0b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ot-card-readonly .is-disabled,
+.ot-card-readonly input:disabled,
+.ot-card-readonly textarea:disabled,
+.ot-card-readonly button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .ot-presence-layer {
   position: absolute;
   inset: 0;

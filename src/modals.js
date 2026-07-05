@@ -635,6 +635,11 @@ class CardModal extends Modal {
     this.addingChecklistItem = false;
     this.saveTimer = null;
     this.savePromise = Promise.resolve();
+    this.readOnly = false;
+    this.lockHolder = null;
+    this.lockAcquired = false;
+    this.lockBoardId = null;
+    this.lockHeartbeat = null;
   }
 
   onOpen() {
@@ -665,7 +670,73 @@ class CardModal extends Modal {
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
     this.localDetails = card.details || "";
     this.localChecklist = clone(card.checklist || []);
+    await this.setupCardLock();
     this.render();
+  }
+
+  /**
+   * Decide whether this card can be edited. If someone else already holds the
+   * lock we open read-only; otherwise we take the lock and keep it warm with a
+   * heartbeat until the modal closes. Offline / no-SyncDeck falls open (editable).
+   */
+  async setupCardLock() {
+    const board = this.plugin.getBoard();
+    this.lockBoardId = board && board.id;
+
+    const holder = this.plugin.getCardLockHolder && this.plugin.getCardLockHolder(this.cardId);
+    if (holder) {
+      this.readOnly = true;
+      this.lockHolder = holder;
+      return;
+    }
+    if (!this.lockBoardId || !this.plugin.acquireCardLock) return;
+
+    const result = await this.plugin.acquireCardLock(this.lockBoardId, this.cardId);
+    if (result && result.ok === false) {
+      this.readOnly = true;
+      this.lockHolder = result.lock || null;
+      return;
+    }
+    this.lockAcquired = !!(result && result.ok && !result.offline);
+    this.plugin.editingCardId = this.cardId;
+    this.startLockHeartbeat();
+  }
+
+  startLockHeartbeat() {
+    this.stopLockHeartbeat();
+    // Re-take the lock well within its server TTL so it never lapses mid-edit.
+    // If the server now reports someone else holds it (we opened while offline,
+    // or another editor took over), drop this modal to read-only.
+    this.lockHeartbeat = window.setInterval(async () => {
+      if (!this.lockBoardId || this.readOnly) return;
+      const result = await this.plugin.acquireCardLock(this.lockBoardId, this.cardId).catch(() => null);
+      if (result && result.ok === false) this.enterReadOnly(result.lock);
+    }, 5000);
+  }
+
+  // Convert an open editable modal into a read-only view after losing the lock.
+  // Unsaved edits are dropped rather than saved, so we never persist a write that
+  // would conflict with the real editor's changes.
+  enterReadOnly(holder) {
+    if (this.readOnly) return;
+    this.readOnly = true;
+    this.lockHolder = holder || this.lockHolder;
+    this.lockAcquired = false;
+    if (this.saveTimer) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.stopLockHeartbeat();
+    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
+    new Notice(`🔒 ${(holder && holder.name) || "Someone"} is editing this card`);
+    this.render();
+  }
+
+  stopLockHeartbeat() {
+    if (this.lockHeartbeat) {
+      window.clearInterval(this.lockHeartbeat);
+      this.lockHeartbeat = null;
+    }
   }
 
   /**
@@ -738,11 +809,44 @@ class CardModal extends Modal {
 
     actions.append(deleteButton, openNote, close);
 
-    this.contentEl.append(title, labelsField, detailsField, checklistField, actions);
-    requestAnimationFrame(() => title.focus());
+    const children = [title, labelsField, detailsField, checklistField, actions];
+    if (this.readOnly) {
+      this.contentEl.addClass("ot-card-readonly");
+      const holderName = (this.lockHolder && this.lockHolder.name) || "Someone";
+      children.unshift(createElement("div", "ot-card-lock-banner", `🔒 ${holderName} is editing this card — read only`));
+    }
+    this.contentEl.append(...children);
+
+    if (this.readOnly) {
+      title.disabled = true;
+      deleteButton.disabled = true;
+      this.disableEditing([labelsField, detailsField, checklistField]);
+    } else {
+      requestAnimationFrame(() => title.focus());
+    }
+  }
+
+  // Freeze every editable control inside the given fields so a read-only viewer
+  // can look but not change anything (Open note / Close stay usable).
+  disableEditing(fields) {
+    fields.forEach((field) => {
+      field.querySelectorAll("input, textarea, button, [contenteditable]").forEach((el) => {
+        if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "BUTTON") {
+          el.disabled = true;
+        } else {
+          el.setAttribute("contenteditable", "false");
+        }
+        el.classList.add("is-disabled");
+      });
+    });
   }
 
   onClose() {
+    this.stopLockHeartbeat();
+    if (!this.readOnly && this.lockBoardId && this.plugin.releaseCardLock) {
+      this.plugin.releaseCardLock(this.lockBoardId, this.cardId).catch(() => {});
+    }
+    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
     if (this.saveTimer) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -982,6 +1086,7 @@ class CardModal extends Modal {
   }
 
   queueSave() {
+    if (this.readOnly) return;
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
@@ -994,6 +1099,7 @@ class CardModal extends Modal {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    if (this.readOnly) return;
 
     const card = this.card;
     if (!card) return;
