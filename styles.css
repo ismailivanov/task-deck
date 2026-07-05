@@ -1,4 +1,5 @@
 .ot-board-root {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -6,6 +7,56 @@
   padding: 16px;
   color: var(--text-normal);
   background: var(--background-primary);
+}
+
+.ot-presence-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ot-presence-cursor {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  filter: drop-shadow(0 3px 8px rgb(0 0 0 / 28%));
+  transform: translate(2px, 2px);
+  transition: left 90ms linear, top 90ms linear;
+}
+
+.ot-presence-arrow {
+  width: 16px;
+  height: 18px;
+  background: var(--ot-presence-color, var(--interactive-accent));
+  clip-path: polygon(0 0, 0 100%, 35% 72%, 55% 100%, 75% 91%, 55% 64%, 100% 64%);
+}
+
+.ot-presence-name {
+  display: inline-flex;
+  align-items: center;
+  max-width: 180px;
+  gap: 5px;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 999px;
+  padding: 3px 8px 3px 5px;
+  overflow: hidden;
+  color: white;
+  background: var(--ot-presence-color, var(--interactive-accent));
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ot-presence-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  object-fit: cover;
 }
 
 .ot-toolbar {
