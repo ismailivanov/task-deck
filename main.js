@@ -3380,8 +3380,37 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   /**
    * Imports Markdown files from a board folder into that board.
    */
+  // Heal boards corrupted by an earlier bug that created a list titled with the
+  // raw QUOTED frontmatter value (e.g. `"Todo"`) when a card's list id didn't
+  // match. A real list title never has surrounding quotes, so such a list is
+  // always spurious: merge its cards into the real same-named list (moving, not
+  // deleting) and drop it; if there is no match, just strip the quotes.
+  healQuotedDuplicateLists(board) {
+    if (!board || !Array.isArray(board.lists)) return false;
+    const isQuoted = (t) => /^".*"$|^'.*'$/.test(String(t == null ? "" : t).trim());
+    const norm = (t) => String(t == null ? "" : t).replace(/^["']+|["']+$/g, "").trim().toLowerCase();
+    let changed = false;
+    for (const dup of board.lists.filter((l) => isQuoted(l.title))) {
+      const target = board.lists.find((l) => l !== dup && !isQuoted(l.title) && norm(l.title) === norm(dup.title));
+      if (target) {
+        for (const cardId of dup.cardIds) {
+          if (!target.cardIds.includes(cardId)) target.cardIds.push(cardId);
+          const card = this.data.cards[cardId];
+          if (card) card.listId = target.id;
+        }
+        board.lists = board.lists.filter((l) => l !== dup);
+        changed = true;
+      } else {
+        dup.title = norm(dup.title) ? dup.title.replace(/^["']+|["']+$/g, "").trim() : dup.title;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   async syncBoardCardsFromFolder(board) {
     if (!board || !board.folderPath) return;
+    if (this.healQuotedDuplicateLists(board)) await this.savePluginData();
     const files = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
       if (!file.path.startsWith(`${board.folderPath}/`)) continue;
@@ -3402,17 +3431,11 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       const existingByPath = Object.values(this.data.cards).find((card) => card.filePath === file.path);
       const cardId = parsed.id || (existingByPath && existingByPath.id) || uid("card");
       const existing = this.data.cards[cardId] || existingByPath;
-      // Resolve the card's list from its frontmatter id. If we don't have that
-      // list yet (e.g. the card was moved into a list that was empty on this
-      // device, so no card carried its id), create it from the frontmatter title
-      // instead of silently dropping the card into the first list.
-      let targetList = this.findList(parsed.listId, board);
-      if (!targetList && parsed.listId) {
-        targetList = { id: parsed.listId, title: parsed.listTitle || "List", color: this.defaultListColor(board.lists.length), cardIds: [] };
-        board.lists.push(targetList);
-        changed = true;
-      }
-      targetList = targetList || this.findList(existing && existing.listId, board) || board.lists[0];
+      // Resolve the card's list from its frontmatter id, falling back to the list
+      // it is already in on this device, then the first list. We do NOT create a
+      // new list from a mismatching id — list ids can differ between devices, and
+      // creating one produces a duplicate list.
+      const targetList = this.findList(parsed.listId, board) || this.findList(existing && existing.listId, board) || board.lists[0];
       const now = new Date().toISOString();
       const card = existing || { id: cardId, createdAt: now };
 
