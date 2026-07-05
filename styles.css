@@ -19,12 +19,14 @@
 
 .ot-presence-cursor {
   position: absolute;
+  top: 0;
+  left: 0;
   display: flex;
   align-items: center;
   gap: 5px;
   filter: drop-shadow(0 3px 8px rgb(0 0 0 / 28%));
-  transform: translate(2px, 2px);
-  transition: left 90ms linear, top 90ms linear;
+  /* Position is driven per-frame from JS via transform (GPU compositing). */
+  will-change: transform;
 }
 
 .ot-presence-arrow {

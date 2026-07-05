@@ -364,7 +364,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       });
       return Array.isArray(result.users) ? result.users : [];
     } catch (error) {
-      return [];
+      // null (not []) signals a transient failure so the caller keeps the last
+      // known roster instead of flickering every cursor off. An unavailable
+      // bridge above returns [] because that is a real "nobody is present".
+      return null;
     }
   }
 
@@ -376,7 +379,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardId)}`);
       return Array.isArray(result.users) ? result.users : [];
     } catch (error) {
-      return [];
+      return null;
     }
   }
 
