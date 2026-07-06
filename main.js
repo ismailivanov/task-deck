@@ -1562,6 +1562,9 @@ class CardModal extends Modal {
     // Images are saved one at a time so concurrent inserts don't race the caret.
     const insertImagesSequentially = async (images) => {
       for (const file of images) await this.insertImageFromFile(file);
+      // Switch to the rendered view once, after the whole batch — doing it per
+      // image would reset the textarea caret and reverse multi-image order.
+      if (this.showDetailsPreview) this.showDetailsPreview();
     };
 
     // Hidden file input backing the "Add image" button (works on mobile too).
@@ -1584,7 +1587,7 @@ class CardModal extends Modal {
 
       Promise.resolve(
         MarkdownRenderer.render(this.app, this.localDetails, preview, this.card.filePath || "", this)
-      ).catch(console.error);
+      ).then(() => this.hydrateImageEmbeds(preview)).catch(console.error);
     };
 
     const showEditor = () => {
@@ -1600,6 +1603,7 @@ class CardModal extends Modal {
       preview.classList.remove("is-hidden");
       renderPreview();
     };
+    this.showDetailsPreview = showPreview;
 
     header.append(
       iconButton("image", "Add image", () => { if (!this.readOnly) imageInput.click(); }),
@@ -1699,13 +1703,24 @@ class CardModal extends Modal {
       let ext = (type.split("/")[1] || "png").split("+")[0].toLowerCase();
       if (ext === "jpeg") ext = "jpg";
       const rawName = (file.name || "").trim();
-      const namedFile = rawName && /\.[a-z0-9]+$/i.test(rawName) && rawName.toLowerCase() !== "image.png";
-      const fileName = namedFile ? rawName : `Pasted image ${imageStamp()}.${ext}`;
+      // Keep a real, human filename; replace empty/generic/UUID names (typical of
+      // clipboard pastes) with a tidy "Pasted image <timestamp>".
+      const realName = rawName
+        && /\.[a-z0-9]+$/i.test(rawName)
+        && rawName.toLowerCase() !== "image.png"
+        && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
+      const fileName = realName ? rawName : `Pasted image ${imageStamp()}.${ext}`;
       const sourcePath = (this.card && this.card.filePath) || "";
       let targetPath = fileName;
       const fm = this.app.fileManager;
       if (fm && typeof fm.getAvailablePathForAttachment === "function") {
         targetPath = await fm.getAvailablePathForAttachment(fileName, sourcePath);
+      }
+      // If it would land at the vault root (no attachment folder configured), keep
+      // it beside the board instead of cluttering the root.
+      if (!targetPath.includes("/")) {
+        const boardFolder = sourcePath.includes("/") ? sourcePath.split("/").slice(0, -1).join("/") : "";
+        if (boardFolder) targetPath = this.uniqueVaultPath(`${boardFolder}/${targetPath}`);
       }
       const parent = targetPath.split("/").slice(0, -1).join("/");
       if (parent && !this.app.vault.getAbstractFileByPath(parent)) {
@@ -1729,6 +1744,42 @@ class CardModal extends Modal {
       console.error(error);
       new Notice("Couldn't add the image.");
     }
+  }
+
+  // Returns `path`, or the next free "name N.ext" variant if it already exists.
+  uniqueVaultPath(path) {
+    if (!this.app.vault.getAbstractFileByPath(path)) return path;
+    const dot = path.lastIndexOf(".");
+    const base = dot > 0 ? path.slice(0, dot) : path;
+    const ext = dot > 0 ? path.slice(dot) : "";
+    let i = 1;
+    let candidate = `${base} ${i}${ext}`;
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      i += 1;
+      candidate = `${base} ${i}${ext}`;
+    }
+    return candidate;
+  }
+
+  /**
+   * MarkdownRenderer inside a Modal doesn't auto-load ![[image]] embeds, so fill
+   * any unresolved image embed with a real <img> pointing at the vault resource.
+   */
+  hydrateImageEmbeds(container) {
+    const sourcePath = (this.card && this.card.filePath) || "";
+    const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
+    container.querySelectorAll(".internal-embed").forEach((embed) => {
+      if (embed.querySelector("img")) return; // already loaded
+      const link = embed.getAttribute("src");
+      if (!link) return;
+      const target = this.app.metadataCache.getFirstLinkpathDest(link, sourcePath);
+      if (!target || !IMAGE_EXT.includes((target.extension || "").toLowerCase())) return;
+      const img = container.ownerDocument.createElement("img");
+      img.src = this.app.vault.getResourcePath(target);
+      img.alt = target.name;
+      embed.replaceChildren(img);
+      embed.classList.add("image-embed", "media-embed", "is-loaded");
+    });
   }
 
   /**
