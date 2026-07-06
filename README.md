@@ -27,7 +27,7 @@ I built it for tracking tasks without leaving Obsidian: lists, cards, labels, da
 - Checklist progress on cards
 - Card details rendered as Markdown
 - Picks up Markdown cards you create outside the board
-- Plays nicely with any sync tool — [Sync Deck](https://github.com/ismailivanov/sync-deck) or Relay
+- Syncs across your devices and team with [Sync Deck](https://github.com/ismailivanov/sync-deck)
 
 ## Usage
 
@@ -44,11 +44,9 @@ If you create a Markdown card directly inside a board folder, Task Deck will pic
 
 ## Sync across devices and teams
 
-Task Deck stores every board and card as plain Markdown in your vault, so it syncs with whatever you already use — it doesn't run its own sync server.
+Task Deck stores every board and card as plain Markdown in your vault, and [**Sync Deck**](https://github.com/ismailivanov/sync-deck) keeps them in sync — across your devices and with your team.
 
-**With [Sync Deck](https://github.com/ismailivanov/sync-deck) (recommended).** Install both plugins and sign in to Sync Deck. Your boards then sync across your devices and teammates, with **live presence** so you can see who's on which card in real time. There's a **Sync your boards & vaults** button in Task Deck's board view that opens Sync Deck. On the Free plan you can sync one board; Pro syncs unlimited (Task Deck stays unlimited locally either way).
-
-**With [Relay](https://community.obsidian.md/plugins/system3-relay).** Because boards are Markdown files, Relay's folder sharing works too — share a board folder and Task Deck keeps it readable on the other side.
+Install both plugins and sign in to Sync Deck. Your boards then sync everywhere, with **live presence** so you can see who's on which card in real time. There's a **Sync your boards & vaults** button in Task Deck's board view that opens Sync Deck. On the Free plan you can sync one board; Pro syncs unlimited — and Task Deck stays unlimited locally either way.
 
 ## Install
 
