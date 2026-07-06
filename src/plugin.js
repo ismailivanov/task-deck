@@ -416,6 +416,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const syncDeck = this.getSyncDeckPlugin();
     if (!syncDeck || typeof syncDeck.activateView !== "function") {
       new Notice("Install the Sync Deck plugin to sync your boards and vaults across devices.");
+      window.open("https://github.com/ismailivanov/SyncDeck");
       return;
     }
     try {

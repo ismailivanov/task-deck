@@ -1839,9 +1839,12 @@ class BoardView extends ItemView {
     if (this.plugin.data.boards.length > 1) title.append(this.renderBoardSelect(board));
     toolbar.append(title);
     const actions = createElement("div", "ot-toolbar-actions");
+    actions.append(textButton("plus-square", "New board", () => this.plugin.createBoardPrompt()));
+    // Cross-sell only for users who don't have Sync Deck yet; hide once installed.
+    if (!this.plugin.getSyncDeckPlugin()) {
+      actions.append(textButton("cloud", "Sync Boards", () => this.plugin.openSyncDeck(), "ot-cloud-cta"));
+    }
     actions.append(
-      textButton("plus-square", "New board", () => this.plugin.createBoardPrompt()),
-      textButton("cloud", "Sync Boards", () => this.plugin.openSyncDeck(), "ot-cloud-cta"),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
       textButton("plus", "Add list", () => this.plugin.addList())
@@ -2197,9 +2200,11 @@ class BoardView extends ItemView {
       createElement("p", "", "Create focused kanban boards and keep every card as a Markdown note in your vault.")
     );
     const welcomeActions = createElement("div", "ot-welcome-actions");
+    welcomeActions.append(textButton("plus", "Create board", () => this.plugin.createBoardPrompt()));
+    if (!this.plugin.getSyncDeckPlugin()) {
+      welcomeActions.append(textButton("cloud", "Sync your boards & vaults", () => this.plugin.openSyncDeck(), "ot-cloud-cta"));
+    }
     welcomeActions.append(
-      textButton("plus", "Create board", () => this.plugin.createBoardPrompt()),
-      textButton("cloud", "Sync your boards & vaults", () => this.plugin.openSyncDeck(), "ot-cloud-cta"),
       textButton("refresh-cw", "Sync", () => this.syncNotes()),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support developer", () => window.open(DONATION_URL, "_blank"))
@@ -3184,6 +3189,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const syncDeck = this.getSyncDeckPlugin();
     if (!syncDeck || typeof syncDeck.activateView !== "function") {
       new Notice("Install the Sync Deck plugin to sync your boards and vaults across devices.");
+      window.open("https://github.com/ismailivanov/SyncDeck");
       return;
     }
     try {
