@@ -3,12 +3,12 @@
 [![Obsidian](https://img.shields.io/badge/Obsidian-1.5%2B-7c3aed?logo=obsidian&logoColor=white)](https://obsidian.md)
 [![Release](https://img.shields.io/github/v/release/ismailivanov/task-deck?label=release)](https://github.com/ismailivanov/task-deck/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f1c40f.svg)](LICENSE)
-[![Sync Deck](https://img.shields.io/badge/cloud%20sync-Sync%20Deck-7c3aed.svg)](https://github.com/ismailivanov/SyncDeck)
+[![Sync Deck](https://img.shields.io/badge/cloud%20sync-Sync%20Deck-7c3aed.svg)](https://github.com/ismailivanov/sync-deck)
 [![Support](https://img.shields.io/badge/support-Buy%20Me%20a%20Coffee-ffdd00.svg)](https://buymeacoffee.com/carbon06)
 
 Task Deck is a small kanban board for Obsidian. It keeps the board simple, but every card is still a real Markdown note in your vault.
 
-I built it for tracking tasks without leaving Obsidian: lists, cards, labels, dates, and checklists in one view. Want it on all your devices, or shared with a team? Pair it with [**Sync Deck**](https://github.com/ismailivanov/SyncDeck) for cloud sync and live presence.
+I built it for tracking tasks without leaving Obsidian: lists, cards, labels, dates, and checklists in one view. Want it on all your devices, or shared with a team? Pair it with [**Sync Deck**](https://github.com/ismailivanov/sync-deck) for cloud sync and live presence.
 
 <img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/6bfa709d-2cf8-4900-a274-9e95927541b4" />
 
@@ -27,7 +27,7 @@ I built it for tracking tasks without leaving Obsidian: lists, cards, labels, da
 - Checklist progress on cards
 - Card details rendered as Markdown
 - Picks up Markdown cards you create outside the board
-- Plays nicely with any sync tool — [Sync Deck](https://github.com/ismailivanov/SyncDeck) or Relay
+- Plays nicely with any sync tool — [Sync Deck](https://github.com/ismailivanov/sync-deck) or Relay
 
 ## Usage
 
@@ -46,7 +46,7 @@ If you create a Markdown card directly inside a board folder, Task Deck will pic
 
 Task Deck stores every board and card as plain Markdown in your vault, so it syncs with whatever you already use — it doesn't run its own sync server.
 
-**With [Sync Deck](https://github.com/ismailivanov/SyncDeck) (recommended).** Install both plugins and sign in to Sync Deck. Your boards then sync across your devices and teammates, with **live presence** so you can see who's on which card in real time. There's a **Sync your boards & vaults** button in Task Deck's board view that opens Sync Deck. On the Free plan you can sync one board; Pro syncs unlimited (Task Deck stays unlimited locally either way).
+**With [Sync Deck](https://github.com/ismailivanov/sync-deck) (recommended).** Install both plugins and sign in to Sync Deck. Your boards then sync across your devices and teammates, with **live presence** so you can see who's on which card in real time. There's a **Sync your boards & vaults** button in Task Deck's board view that opens Sync Deck. On the Free plan you can sync one board; Pro syncs unlimited (Task Deck stays unlimited locally either way).
 
 **With [Relay](https://community.obsidian.md/plugins/system3-relay).** Because boards are Markdown files, Relay's folder sharing works too — share a board folder and Task Deck keeps it readable on the other side.
 
