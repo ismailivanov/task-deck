@@ -3435,11 +3435,22 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     // made on another device (which only edits the index) is picked up here.
     if (!this.isCardFile(file) && !this.isBoardFolder(file) && !this.isBoardIndexFile(file)) return;
 
+    // Accumulate deletes across the debounce window. A single timer keyed to the
+    // LAST event would drop every delete but one in a multi-file delete burst
+    // (e.g. deleting a board folder with many cards, or a pull that removes
+    // several), leaving stale cards that writeAllCardFiles later resurrects.
+    if (eventName === "delete") {
+      this.pendingCardDeletes = this.pendingCardDeletes || [];
+      this.pendingCardDeletes.push(file);
+    }
+
     window.clearTimeout(this.cardFolderSyncTimer);
     this.cardFolderSyncTimer = window.setTimeout(async () => {
-      if (eventName === "delete") {
-        const removedBoard = await this.syncDeletedBoardFolder(file);
-        if (!removedBoard) await this.syncDeletedCardFile(file);
+      const deletes = this.pendingCardDeletes || [];
+      this.pendingCardDeletes = [];
+      for (const deleted of deletes) {
+        const removedBoard = await this.syncDeletedBoardFolder(deleted);
+        if (!removedBoard) await this.syncDeletedCardFile(deleted);
       }
       await this.syncCardsFromFolder();
       this.refreshViews();
