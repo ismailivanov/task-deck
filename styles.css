@@ -1364,6 +1364,8 @@
 .ot-image-tile {
   display: block;
   width: 100%;
+  height: auto;      /* override Obsidian's fixed button height... */
+  min-height: 0;     /* ...so the image isn't clipped to a thin strip */
   padding: 0;
   border: 0;
   border-radius: 12px;
