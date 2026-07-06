@@ -23,6 +23,33 @@ const {
   initials,
 } = require("./helpers");
 
+// Pull image files out of a paste/drop DataTransfer (empty if none).
+function imageFilesFromTransfer(dt) {
+  if (!dt) return [];
+  const out = [];
+  if (dt.files && dt.files.length) {
+    for (const file of Array.from(dt.files)) {
+      if (file && file.type && file.type.startsWith("image/")) out.push(file);
+    }
+  }
+  if (!out.length && dt.items && dt.items.length) {
+    for (const item of Array.from(dt.items)) {
+      if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) out.push(file);
+      }
+    }
+  }
+  return out;
+}
+
+// Timestamp for auto-named pasted images, e.g. 20260706T....
+function imageStamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
 /**
  * Small reusable text prompt for list names and other one-field actions.
  */
@@ -971,9 +998,26 @@ class CardModal extends Modal {
 
     const preview = createElement("div", "ot-markdown-preview");
     const editor = createElement("textarea", "ot-textarea ot-details-editor is-hidden");
-    editor.placeholder = "Card notes...";
+    editor.placeholder = "Card notes…";
     editor.value = this.localDetails;
     this.detailsTextarea = editor;
+    this.detailsPreview = preview;
+
+    // Images are saved one at a time so concurrent inserts don't race the caret.
+    const insertImagesSequentially = async (images) => {
+      for (const file of images) await this.insertImageFromFile(file);
+    };
+
+    // Hidden file input backing the "Add image" button (works on mobile too).
+    const imageInput = createElement("input", "ot-hidden-file-input");
+    imageInput.type = "file";
+    imageInput.accept = "image/*";
+    imageInput.multiple = true;
+    imageInput.addEventListener("change", () => {
+      const files = Array.from(imageInput.files || []);
+      imageInput.value = "";
+      if (files.length) insertImagesSequentially(files).catch(console.error);
+    });
 
     const renderPreview = () => {
       preview.replaceChildren();
@@ -1001,7 +1045,10 @@ class CardModal extends Modal {
       renderPreview();
     };
 
-    header.append(iconButton("pencil", "Edit details", showEditor));
+    header.append(
+      iconButton("image", "Add image", () => { if (!this.readOnly) imageInput.click(); }),
+      iconButton("pencil", "Edit details", showEditor)
+    );
     preview.addEventListener("click", showEditor);
     editor.addEventListener("input", () => {
       this.localDetails = editor.value;
@@ -1012,9 +1059,120 @@ class CardModal extends Modal {
       this.saveNow().catch(console.error);
     });
 
+    // Paste or drop an image straight into the notes: it's saved into the vault
+    // (respecting the attachment-folder setting) and embedded compactly.
+    const isFileDrag = (event) => {
+      const types = event.dataTransfer && Array.from(event.dataTransfer.types || []);
+      return !!(types && types.includes("Files"));
+    };
+    const handlePaste = (event) => {
+      const images = imageFilesFromTransfer(event.clipboardData);
+      if (!images.length) return; // plain text paste — leave it alone
+      event.preventDefault();
+      insertImagesSequentially(images).catch(console.error);
+    };
+    const handleDrop = (event) => {
+      if (this.readOnly || !isFileDrag(event)) return; // not a file drop — leave it
+      // We invited this drop, so consume it whether or not it's an image, else a
+      // stray file would fall through to Obsidian's own handling.
+      event.preventDefault();
+      event.stopPropagation();
+      field.classList.remove("is-image-drag");
+      const images = imageFilesFromTransfer(event.dataTransfer);
+      if (!images.length) {
+        new Notice("Only images can be embedded here.");
+        return;
+      }
+      insertImagesSequentially(images).catch(console.error);
+    };
+    editor.addEventListener("paste", handlePaste);
+    // Handlers live on the whole field so crossing between the preview/editor and
+    // their own children (e.g. an embedded image) never flickers the hint.
+    field.addEventListener("dragover", (event) => {
+      if (this.readOnly || !isFileDrag(event)) return;
+      event.preventDefault();
+      field.classList.add("is-image-drag");
+    });
+    field.addEventListener("dragleave", (event) => {
+      if (!field.contains(event.relatedTarget)) field.classList.remove("is-image-drag");
+    });
+    field.addEventListener("drop", handleDrop);
+
     renderPreview();
-    field.append(preview, editor);
+    field.append(preview, editor, imageInput);
     return field;
+  }
+
+  /**
+   * Inserts text at the details caret, switching from preview to the editor if
+   * needed, and queues a save. Embeds land on their own line.
+   */
+  insertDetailText(text) {
+    const ta = this.detailsTextarea;
+    if (!ta || this.readOnly) return false;
+    if (ta.classList.contains("is-hidden")) {
+      ta.value = this.localDetails;
+      if (this.detailsPreview) this.detailsPreview.classList.add("is-hidden");
+      ta.classList.remove("is-hidden");
+    }
+    const start = typeof ta.selectionStart === "number" ? ta.selectionStart : ta.value.length;
+    const end = typeof ta.selectionEnd === "number" ? ta.selectionEnd : ta.value.length;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    const prefix = before && !before.endsWith("\n") ? "\n" : "";
+    const suffix = after && !after.startsWith("\n") ? "\n" : "";
+    const inserted = `${prefix}${text}${suffix}`;
+    ta.value = before + inserted + after;
+    const caret = start + inserted.length;
+    ta.selectionStart = ta.selectionEnd = caret;
+    this.localDetails = ta.value;
+    ta.focus();
+    this.queueSave();
+    return true;
+  }
+
+  /**
+   * Saves a pasted/dropped image into the vault (via the attachment-folder
+   * setting) and inserts a compact embed at the caret.
+   */
+  async insertImageFromFile(file) {
+    if (this.readOnly || !file) return;
+    try {
+      const data = await file.arrayBuffer();
+      const type = file.type || "image/png";
+      let ext = (type.split("/")[1] || "png").split("+")[0].toLowerCase();
+      if (ext === "jpeg") ext = "jpg";
+      const rawName = (file.name || "").trim();
+      const namedFile = rawName && /\.[a-z0-9]+$/i.test(rawName) && rawName.toLowerCase() !== "image.png";
+      const fileName = namedFile ? rawName : `Pasted image ${imageStamp()}.${ext}`;
+      const sourcePath = (this.card && this.card.filePath) || "";
+      let targetPath = fileName;
+      const fm = this.app.fileManager;
+      if (fm && typeof fm.getAvailablePathForAttachment === "function") {
+        targetPath = await fm.getAvailablePathForAttachment(fileName, sourcePath);
+      }
+      const parent = targetPath.split("/").slice(0, -1).join("/");
+      if (parent && !this.app.vault.getAbstractFileByPath(parent)) {
+        await this.app.vault.createFolder(parent).catch(() => {});
+      }
+      // The card lock can be lost during the awaits above; don't write a binary
+      // we can no longer reference into the note.
+      if (this.readOnly || !this.detailsTextarea) return;
+      await this.app.vault.createBinary(targetPath, data);
+      const inserted = this.insertDetailText(`![[${targetPath}]]`);
+      if (!inserted) {
+        // Couldn't place the reference — trash the orphan instead of leaving it.
+        const created = this.app.vault.getAbstractFileByPath(targetPath);
+        if (created) await this.app.vault.trash(created, false).catch(() => {});
+        return;
+      }
+      // Persist the binary and its embed together (not just the debounced save),
+      // so a crash right after can't leave an unreferenced attachment.
+      await this.saveNow();
+    } catch (error) {
+      console.error(error);
+      new Notice("Couldn't add the image.");
+    }
   }
 
   /**
