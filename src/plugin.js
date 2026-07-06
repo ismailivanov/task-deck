@@ -398,6 +398,32 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return (plugins && plugins["sync-deck"]) || null;
   }
 
+  // Free Sync Deck accounts can only sync a limited number of boards. The gate
+  // applies ONLY when Sync Deck is installed AND signed in AND on the free plan,
+  // so a standalone Task Deck (no cloud account) stays unlimited. Pro or an
+  // unset/null limit => unlimited. Existing boards are never removed; only NEW
+  // board creation past the limit is blocked.
+  boardGate() {
+    const syncDeck = this.getSyncDeckPlugin();
+    const sd = syncDeck && syncDeck.data;
+    if (!sd || !sd.signedIn) return { limited: false, limit: null };
+    const limit = sd.boardLimit;
+    if (sd.plan === "pro" || limit === null || limit === undefined || !Number.isFinite(Number(limit))) {
+      return { limited: false, limit: null };
+    }
+    return { limited: true, limit: Number(limit) };
+  }
+
+  // True (and warns) when the free board limit is already reached.
+  boardLimitReached(notify) {
+    const gate = this.boardGate();
+    if (!gate.limited || this.data.boards.length < gate.limit) return false;
+    if (notify) {
+      new Notice(`Your free plan includes ${gate.limit} board${gate.limit === 1 ? "" : "s"}. Upgrade Sync Deck to Pro to sync more.`);
+    }
+    return true;
+  }
+
   getSyncDeckBridge() {
     const syncDeck = this.getSyncDeckPlugin();
     const data = syncDeck && syncDeck.data;
@@ -865,12 +891,15 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   createBoardPrompt() {
+    if (this.boardLimitReached(true)) return;
     this.promptText("Create board", "Board name", "", async (name) => {
       await this.createBoard(name);
     });
   }
 
   async createBoard(name) {
+    // Safety net: never exceed the free board limit even via a non-prompt caller.
+    if (this.boardLimitReached(true)) return null;
     const board = {
       id: uid("board"),
       name,
