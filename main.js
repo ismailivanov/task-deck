@@ -1652,9 +1652,8 @@ class CardModal extends Modal {
     // Images are saved one at a time so concurrent inserts don't race the caret.
     const insertImagesSequentially = async (images) => {
       for (const file of images) await this.insertImageFromFile(file);
-      // Switch to the rendered view once, after the whole batch — doing it per
-      // image would reset the textarea caret and reverse multi-image order.
-      if (this.showDetailsPreview) this.showDetailsPreview();
+      // When adding from the read view, re-render so the new image shows inline.
+      if (!this.editingDetails) renderPreview();
     };
 
     // Hidden file input backing the "Add image" button (works on mobile too).
@@ -1681,25 +1680,41 @@ class CardModal extends Modal {
       preview.append(createElement("pre", "ot-markdown-fallback", markdown || "Could not render details."));
     };
 
+    const COLLAPSED_MAX = 340;
     const renderPreview = () => {
       preview.replaceChildren();
-      const markdown = stripImageEmbeds(this.currentDetailsText());
-      const hasImages = imageRefsFromMarkdown(this.currentDetailsText()).length > 0;
       preview.classList.remove("is-hidden");
-      if (!markdown) {
-        if (hasImages) {
-          preview.classList.add("is-hidden");
-          return;
-        }
-        preview.append(createElement("span", "ot-empty-text", "No details"));
+      const markdown = this.currentDetailsText();
+      if (!markdown.trim()) {
+        preview.append(createElement("span", "ot-empty-text", "No description"));
         return;
       }
 
+      // Render the whole note — text AND images — inline, in order, as one
+      // flowing document (like Trello), then fill any image embeds.
+      const body = createElement("div", "ot-details-body");
+      preview.append(body);
       try {
         Promise.resolve(
-          MarkdownRenderer.render(this.app, markdown, preview, this.card.filePath || "", this)
+          MarkdownRenderer.render(this.app, markdown, body, this.card.filePath || "", this)
         )
-          .then(() => this.hydrateImageEmbeds(preview))
+          .then(() => {
+            this.hydrateImageEmbeds(body);
+            // Collapse long descriptions behind a "Show more" toggle.
+            requestAnimationFrame(() => {
+              if (body.scrollHeight > COLLAPSED_MAX + 48) {
+                body.classList.add("is-clamped");
+                const more = createElement("button", "ot-details-more", "Show more");
+                more.type = "button";
+                more.addEventListener("click", (event) => {
+                  event.stopPropagation();
+                  const collapsed = body.classList.toggle("is-clamped");
+                  more.textContent = collapsed ? "Show more" : "Show less";
+                });
+                preview.append(more);
+              }
+            });
+          })
           .catch((error) => renderPreviewFallback(markdown, error));
       } catch (error) {
         renderPreviewFallback(markdown, error);
@@ -1727,7 +1742,6 @@ class CardModal extends Modal {
       this.render();
     };
     this.showDetailsPreview = () => {
-      renderGallery();
       renderPreview();
     };
 
@@ -1859,7 +1873,6 @@ class CardModal extends Modal {
       editor.classList.remove("is-hidden");
       editor.addEventListener("input", () => {
         this.detailsDraft = editor.value;
-        renderGallery();
       });
       editor.addEventListener("paste", handlePaste);
 
@@ -1875,8 +1888,7 @@ class CardModal extends Modal {
       actions.append(save, cancel);
 
       header.append(heading);
-      renderGallery();
-      editorFrame.append(toolbar, gallery, editor);
+      editorFrame.append(toolbar, editor);
       field.append(header, editorFrame, actions, imageInput);
       requestAnimationFrame(() => editor.focus());
       return field;
@@ -1884,10 +1896,8 @@ class CardModal extends Modal {
 
     header.append(heading);
     if (!this.readOnly) header.append(textButton("pencil", "Edit", showEditor, "ot-details-edit-button"));
-    preview.addEventListener("click", showEditor);
-    renderGallery();
     renderPreview();
-    field.append(gallery, preview, editor, imageInput);
+    field.append(preview, editor, imageInput);
     field.prepend(header);
     return field;
   }
@@ -1979,30 +1989,28 @@ class CardModal extends Modal {
    * needed, and queues a save. Embeds land on their own line.
    */
   insertDetailText(text) {
+    if (this.readOnly) return false;
     const ta = this.detailsTextarea;
-    if (!ta || this.readOnly) return false;
-    if (ta.classList.contains("is-hidden")) {
-      ta.value = this.currentDetailsText();
-      if (this.detailsPreview) this.detailsPreview.classList.add("is-hidden");
-      ta.classList.remove("is-hidden");
-    }
-    const start = typeof ta.selectionStart === "number" ? ta.selectionStart : ta.value.length;
-    const end = typeof ta.selectionEnd === "number" ? ta.selectionEnd : ta.value.length;
-    const before = ta.value.slice(0, start);
-    const after = ta.value.slice(end);
-    const prefix = before && !before.endsWith("\n") ? "\n" : "";
-    const suffix = after && !after.startsWith("\n") ? "\n" : "";
-    const inserted = `${prefix}${text}${suffix}`;
-    ta.value = before + inserted + after;
-    const caret = start + inserted.length;
-    ta.selectionStart = ta.selectionEnd = caret;
-    if (this.editingDetails) {
+    // In the editor, drop the embed at the caret so it lands where you're typing.
+    if (this.editingDetails && ta && !ta.classList.contains("is-hidden")) {
+      const start = typeof ta.selectionStart === "number" ? ta.selectionStart : ta.value.length;
+      const end = typeof ta.selectionEnd === "number" ? ta.selectionEnd : ta.value.length;
+      const before = ta.value.slice(0, start);
+      const after = ta.value.slice(end);
+      const prefix = before && !before.endsWith("\n") ? "\n" : "";
+      const suffix = after && !after.startsWith("\n") ? "\n" : "";
+      const inserted = `${prefix}${text}${suffix}`;
+      ta.value = before + inserted + after;
+      const caret = start + inserted.length;
+      ta.selectionStart = ta.selectionEnd = caret;
       this.detailsDraft = ta.value;
-    } else {
-      this.localDetails = ta.value;
-      this.queueSave();
+      ta.focus();
+      return true;
     }
-    ta.focus();
+    // From the read view, append the embed on its own line.
+    const base = String(this.localDetails || "");
+    const sep = !base ? "" : (base.endsWith("\n") ? "\n" : "\n\n");
+    this.localDetails = `${base}${sep}${text}`;
     return true;
   }
 
