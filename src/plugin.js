@@ -406,7 +406,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   boardGate() {
     const syncDeck = this.getSyncDeckPlugin();
     const sd = syncDeck && syncDeck.data;
-    if (!sd || !sd.signedIn) return { limited: false, limit: null };
+    // The board limit only applies to SYNCED boards: it bites only when the user
+    // is signed in AND actively syncing on the free plan. Not syncing (sync off
+    // or no Sync Deck account) => unlimited local boards.
+    if (!sd || !sd.signedIn || !sd.syncEnabled) return { limited: false, limit: null };
     const limit = sd.boardLimit;
     if (sd.plan === "pro" || limit === null || limit === undefined || !Number.isFinite(Number(limit))) {
       return { limited: false, limit: null };
@@ -419,7 +422,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const gate = this.boardGate();
     if (!gate.limited || this.data.boards.length < gate.limit) return false;
     if (notify) {
-      new Notice(`Your free plan includes ${gate.limit} board${gate.limit === 1 ? "" : "s"}. Upgrade Sync Deck to Pro to sync more.`);
+      new Notice(`While syncing, the free plan covers ${gate.limit} board${gate.limit === 1 ? "" : "s"}. Upgrade Sync Deck to Pro to sync more.`);
     }
     return true;
   }
