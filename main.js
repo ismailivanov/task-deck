@@ -1841,6 +1841,7 @@ class BoardView extends ItemView {
     const actions = createElement("div", "ot-toolbar-actions");
     actions.append(
       textButton("plus-square", "New board", () => this.plugin.createBoardPrompt()),
+      textButton("cloud", "Sync Boards", () => this.plugin.openSyncDeck(), "ot-cloud-cta"),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
       textButton("plus", "Add list", () => this.plugin.addList())
