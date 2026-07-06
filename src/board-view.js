@@ -444,6 +444,7 @@ class BoardView extends ItemView {
     const welcomeActions = createElement("div", "ot-welcome-actions");
     welcomeActions.append(
       textButton("plus", "Create board", () => this.plugin.createBoardPrompt()),
+      textButton("cloud", "Sync your boards & vaults", () => this.plugin.openSyncDeck(), "ot-cloud-cta"),
       textButton("refresh-cw", "Sync", () => this.syncNotes()),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support developer", () => window.open(DONATION_URL, "_blank"))

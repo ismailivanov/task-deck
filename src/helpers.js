@@ -271,8 +271,8 @@ function iconButton(icon, label, onClick) {
   return button;
 }
 
-function textButton(icon, label, onClick) {
-  const button = createElement("button", "ot-text-button");
+function textButton(icon, label, onClick, className = "") {
+  const button = createElement("button", `ot-text-button ${className}`.trim());
   button.type = "button";
 
   const iconSlot = createElement("span", "ot-button-icon");

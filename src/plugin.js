@@ -66,6 +66,18 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       });
     });
 
+    // Boards sync themselves: vault events reconcile on change, and this periodic
+    // safety net re-imports every ~30s so remote edits (pulled by Sync Deck) show
+    // up even if an event is missed. Skipped while reconciling or editing a card,
+    // so it never disrupts the user. The manual "Sync" button still works too.
+    this.registerInterval(window.setInterval(() => {
+      if (this.reconciling || this.editingCardId) return;
+      const before = JSON.stringify(this.data.boards);
+      Promise.resolve(this.syncCardsFromFolder())
+        .then(() => { if (JSON.stringify(this.data.boards) !== before) this.refreshViews(); })
+        .catch(() => {});
+    }, 30000));
+
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
     this.addCommand({
       id: "open-board",
@@ -396,6 +408,21 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   getSyncDeckPlugin() {
     const plugins = this.app.plugins && this.app.plugins.plugins;
     return (plugins && plugins["sync-deck"]) || null;
+  }
+
+  // Open the Sync Deck panel (cloud sync for boards + vaults). If Sync Deck isn't
+  // installed, point the user at it.
+  async openSyncDeck() {
+    const syncDeck = this.getSyncDeckPlugin();
+    if (!syncDeck || typeof syncDeck.activateView !== "function") {
+      new Notice("Install the Sync Deck plugin to sync your boards and vaults across devices.");
+      return;
+    }
+    try {
+      await syncDeck.activateView();
+    } catch (error) {
+      new Notice("Could not open Sync Deck.");
+    }
   }
 
   // Free Sync Deck accounts can only sync a limited number of boards. The gate

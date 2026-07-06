@@ -734,6 +734,16 @@
   background: var(--background-modifier-hover);
 }
 
+.ot-text-button.ot-cloud-cta {
+  color: var(--interactive-accent);
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+.ot-text-button.ot-cloud-cta:hover {
+  color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+}
+
 .ot-icon-button:disabled,
 .ot-icon-button:disabled:hover {
   color: var(--text-faint);
