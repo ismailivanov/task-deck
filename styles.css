@@ -501,7 +501,7 @@
 .ot-card-title {
   flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   font-weight: 650;
   line-height: 1.35;
 }
@@ -1437,13 +1437,13 @@
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .ot-markdown-fallback {
   margin: 0;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   font: inherit;
 }
 
@@ -1704,7 +1704,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: 8px;
 }
 
 .ot-card-assignees {
