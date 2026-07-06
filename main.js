@@ -426,6 +426,47 @@ function frontmatterValue(markdown, key) {
   return match ? textLine(match[1]) : null;
 }
 
+// The list structure (id/title/color/order) is embedded in the board index file
+// as a base64 JSON blob inside an HTML comment, so it syncs across devices and
+// survives Markdown/YAML quirks (titles can be any UTF-8 text).
+const LIST_META_RE = /<!--task-deck-lists:([A-Za-z0-9+/=]*)-->/;
+
+function encodeListMeta(lists, deleted) {
+  const data = {
+    l: (Array.isArray(lists) ? lists : []).map((l) => ({
+      i: l.id,
+      t: l.title == null ? "" : String(l.title),
+      c: l.color || "",
+    })),
+    // Sorted so an identical tombstone SET encodes to identical bytes on every
+    // device — otherwise two devices that deleted lists in a different order
+    // would produce different index content and churn forever.
+    d: (Array.isArray(deleted) ? deleted.filter(Boolean) : []).slice().sort(),
+  };
+  try {
+    return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+  } catch (error) {
+    return "";
+  }
+}
+
+// Returns { lists: [{i,t,c}], deleted: [ids] } or null. Tolerates the older
+// bare-array form ([{i,t,c}]) as { lists, deleted: [] }.
+function decodeListMeta(markdown) {
+  const match = String(markdown || "").match(LIST_META_RE);
+  if (!match || !match[1]) return null;
+  try {
+    const obj = JSON.parse(decodeURIComponent(escape(atob(match[1]))));
+    if (Array.isArray(obj)) return { lists: obj, deleted: [] };
+    if (obj && typeof obj === "object") {
+      return { lists: Array.isArray(obj.l) ? obj.l : [], deleted: Array.isArray(obj.d) ? obj.d : [] };
+    }
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
 /**
  * Parses a Task Deck card note into the in-memory card fields.
  *
@@ -507,6 +548,8 @@ module.exports = {
   assigneesToFrontmatter,
   initials,
   parseCardMarkdown,
+  encodeListMeta,
+  decodeListMeta,
 };
 
   },
@@ -2742,6 +2785,8 @@ const {
   labelsToFrontmatter,
   assigneesToFrontmatter,
   parseCardMarkdown,
+  encodeListMeta,
+  decodeListMeta,
   cardFileBaseName,
   taskDeckListTag,
   textLine,
@@ -2900,6 +2945,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
           cardIds: Array.isArray(list && list.cardIds) ? list.cardIds : [],
         }))
         : [],
+      deletedListIds: Array.isArray(board && board.deletedListIds) ? board.deletedListIds : [],
     };
   }
 
@@ -2981,6 +3027,22 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         lists: [],
       };
       const listsById = new Map();
+      // Build the list structure from the synced metadata (correct ids/titles/
+      // colors/order) so a board discovered here matches other devices; cards
+      // then attach by their list id below. Legacy indexes (no meta) keep the
+      // old heading/card-derived reconstruction.
+      const listMeta = decodeListMeta(markdown);
+      const metaLists = listMeta && Array.isArray(listMeta.lists) ? listMeta.lists : null;
+      const metaTombstones = new Set(listMeta && Array.isArray(listMeta.deleted) ? listMeta.deleted : []);
+      board.deletedListIds = Array.from(metaTombstones);
+      if (metaLists && metaLists.length) {
+        for (const entry of metaLists) {
+          if (!entry || !entry.i || listsById.has(entry.i) || metaTombstones.has(entry.i)) continue;
+          const list = { id: entry.i, title: entry.t || "List", color: cleanColor(entry.c) || this.defaultListColor(board.lists.length), cardIds: [] };
+          listsById.set(entry.i, list);
+          board.lists.push(list);
+        }
+      }
       const sectionMatches = Array.from(markdown.matchAll(/^##\s+(.+)$/gm));
       let restoredCards = 0;
 
@@ -3001,7 +3063,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
           const parsed = parseCardMarkdown(await this.app.vault.read(cardFile));
           if (parsed.boardId) board.id = parsed.boardId;
           const listId = parsed.listId || uid("list");
-          if (!listsById.has(listId)) {
+          // With metadata present, NEVER create a list from a card link — the
+          // meta is authoritative, and a card with a divergent list id must not
+          // spawn a duplicate. It falls back to a real list on card import.
+          if (!metaLists && !listsById.has(listId)) {
             const list = { id: listId, title, color: this.defaultListColor(board.lists.length), cardIds: [] };
             listsById.set(listId, list);
             board.lists.push(list);
@@ -3009,10 +3074,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
           restoredCards += 1;
         }
 
-        if (explicitIndex && board.lists.length === listCountBefore) board.lists.push(fallbackList);
+        if (!metaLists && explicitIndex && board.lists.length === listCountBefore) board.lists.push(fallbackList);
       }
 
-      if (!explicitIndex && !restoredCards) continue;
+      if (!explicitIndex && !restoredCards && !(metaLists && metaLists.length)) continue;
       this.data.boards.push(board);
       knownFolders.add(folderPath);
       changed = true;
@@ -3294,10 +3359,17 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   /**
    * Debounces vault events so a save/rename burst only triggers one rescan.
    */
+  isBoardIndexFile(file) {
+    return !!(file && file.path && file.extension === "md"
+      && this.data.boards.some((board) => file.path === this.boardIndexPath(board) || file.path === this.legacyBoardIndexPath(board)));
+  }
+
   queueCardFolderSync(file, eventName) {
     // Ignore the writes our own startup reconcile makes; it re-imports at the end.
     if (this.reconciling) return;
-    if (!this.isCardFile(file) && !this.isBoardFolder(file)) return;
+    // Also re-sync when the board INDEX file changes, so a list add/rename/reorder
+    // made on another device (which only edits the index) is picked up here.
+    if (!this.isCardFile(file) && !this.isBoardFolder(file) && !this.isBoardIndexFile(file)) return;
 
     window.clearTimeout(this.cardFolderSyncTimer);
     this.cardFolderSyncTimer = window.setTimeout(async () => {
@@ -3408,9 +3480,67 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return changed;
   }
 
+  // Sync the board's list STRUCTURE from the index file (which carries list
+  // id/title/color/order and syncs across devices): add lists present in the
+  // index but missing here, update titles/colors, and apply the index order.
+  // Conservative — it NEVER drops a list, so a device's own not-yet-synced lists
+  // (and any list a delete didn't propagate) are kept, appended after the index
+  // order. No list or its cards can be lost. Returns true if anything changed.
+  async reconcileListsFromIndex(board) {
+    if (!board || !Array.isArray(board.lists)) return false;
+    const indexFile = this.app.vault.getAbstractFileByPath(this.boardIndexPath(board));
+    if (!indexFile || indexFile.extension !== "md") return false;
+    let markdown;
+    try { markdown = await this.app.vault.read(indexFile); } catch (error) { return false; }
+    const meta = decodeListMeta(markdown);
+    if (!meta || !Array.isArray(meta.lists) || !meta.lists.length) return false;
+
+    board.deletedListIds = Array.isArray(board.deletedListIds) ? board.deletedListIds : [];
+    const tombstones = new Set([...board.deletedListIds, ...meta.deleted]);
+
+    const byId = new Map(board.lists.map((l) => [l.id, l]));
+    const ordered = [];
+    const used = new Set();
+    let changed = false;
+    for (const entry of meta.lists) {
+      if (!entry || !entry.i || used.has(entry.i) || tombstones.has(entry.i)) continue;
+      used.add(entry.i);
+      let list = byId.get(entry.i);
+      if (list) {
+        if (entry.t != null && list.title !== entry.t) { list.title = entry.t; changed = true; }
+        const color = cleanColor(entry.c);
+        if (color && list.color !== color) { list.color = color; changed = true; }
+      } else {
+        list = { id: entry.i, title: entry.t || "List", color: cleanColor(entry.c) || this.defaultListColor(ordered.length), cardIds: [] };
+        changed = true;
+      }
+      ordered.push(list);
+    }
+    // Keep this device's own not-yet-synced lists; DROP a list deleted elsewhere.
+    for (const list of board.lists) {
+      if (used.has(list.id)) continue;
+      if (tombstones.has(list.id)) { changed = true; continue; }
+      ordered.push(list);
+      used.add(list.id);
+    }
+    // Merge tombstone sets so deletion converges and no list resurrects. Sorted
+    // so the persisted/encoded set is order-independent across devices.
+    const merged = Array.from(tombstones).sort().slice(-200);
+    if (merged.join("|") !== board.deletedListIds.join("|")) { board.deletedListIds = merged; changed = true; }
+
+    const orderChanged = board.lists.map((l) => l.id).join("") !== ordered.map((l) => l.id).join("");
+    if (changed || orderChanged) {
+      board.lists = ordered;
+      return true;
+    }
+    return false;
+  }
+
   async syncBoardCardsFromFolder(board) {
     if (!board || !board.folderPath) return;
-    if (this.healQuotedDuplicateLists(board)) await this.savePluginData();
+    let changed = false;
+    if (this.healQuotedDuplicateLists(board)) changed = true;
+    if (await this.reconcileListsFromIndex(board)) changed = true;
     const files = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
       if (!file.path.startsWith(`${board.folderPath}/`)) continue;
@@ -3418,7 +3548,6 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       if (await this.isGeneratedBoardIndexFile(file)) continue;
       files.push(file);
     }
-    let changed = false;
     if (!files.length) {
       if (changed) await this.savePluginData();
       return;
@@ -3632,6 +3761,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       await this.deleteCard(cardId, false);
     }
     board.lists = board.lists.filter((item) => item.id !== listId);
+    // Tombstone the deletion so it syncs (via the index) and the list never
+    // resurrects from another device that still has it.
+    board.deletedListIds = Array.isArray(board.deletedListIds) ? board.deletedListIds : [];
+    if (!board.deletedListIds.includes(listId)) board.deletedListIds = [...board.deletedListIds, listId].slice(-200);
     await this.savePluginData();
     this.refreshViews();
   }
@@ -3949,6 +4082,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       `# ${textLine(board.name)}`,
       "",
       BOARD_INDEX_MARKER,
+      // Machine-readable list structure (id/title/color/order) + deleted-list
+      // tombstones so lists sync (incl. deletion) across devices. Invisible in
+      // preview; the headings below stay readable.
+      `<!--task-deck-lists:${encodeListMeta(board.lists, board.deletedListIds)}-->`,
       "",
     ];
 
@@ -3966,7 +4103,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const markdown = lines.join("\n");
     const file = this.app.vault.getAbstractFileByPath(this.boardIndexPath(board));
     if (file && file.extension === "md") {
-      await this.app.vault.modify(file, markdown);
+      // Only rewrite when content actually changed. Rewriting an identical index
+      // would re-upload it and re-trigger the peer's reconcile, causing endless
+      // index churn between two devices.
+      let current = null;
+      try { current = await this.app.vault.read(file); } catch (error) { current = null; }
+      if (current !== markdown) await this.app.vault.modify(file, markdown);
     } else if (!file) {
       await this.app.vault.create(this.boardIndexPath(board), markdown);
     }

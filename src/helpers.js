@@ -423,6 +423,47 @@ function frontmatterValue(markdown, key) {
   return match ? textLine(match[1]) : null;
 }
 
+// The list structure (id/title/color/order) is embedded in the board index file
+// as a base64 JSON blob inside an HTML comment, so it syncs across devices and
+// survives Markdown/YAML quirks (titles can be any UTF-8 text).
+const LIST_META_RE = /<!--task-deck-lists:([A-Za-z0-9+/=]*)-->/;
+
+function encodeListMeta(lists, deleted) {
+  const data = {
+    l: (Array.isArray(lists) ? lists : []).map((l) => ({
+      i: l.id,
+      t: l.title == null ? "" : String(l.title),
+      c: l.color || "",
+    })),
+    // Sorted so an identical tombstone SET encodes to identical bytes on every
+    // device — otherwise two devices that deleted lists in a different order
+    // would produce different index content and churn forever.
+    d: (Array.isArray(deleted) ? deleted.filter(Boolean) : []).slice().sort(),
+  };
+  try {
+    return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+  } catch (error) {
+    return "";
+  }
+}
+
+// Returns { lists: [{i,t,c}], deleted: [ids] } or null. Tolerates the older
+// bare-array form ([{i,t,c}]) as { lists, deleted: [] }.
+function decodeListMeta(markdown) {
+  const match = String(markdown || "").match(LIST_META_RE);
+  if (!match || !match[1]) return null;
+  try {
+    const obj = JSON.parse(decodeURIComponent(escape(atob(match[1]))));
+    if (Array.isArray(obj)) return { lists: obj, deleted: [] };
+    if (obj && typeof obj === "object") {
+      return { lists: Array.isArray(obj.l) ? obj.l : [], deleted: Array.isArray(obj.d) ? obj.d : [] };
+    }
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
 /**
  * Parses a Task Deck card note into the in-memory card fields.
  *
@@ -504,4 +545,6 @@ module.exports = {
   assigneesToFrontmatter,
   initials,
   parseCardMarkdown,
+  encodeListMeta,
+  decodeListMeta,
 };
