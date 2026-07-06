@@ -1008,6 +1008,32 @@ class CardModal extends Modal {
   }
 
   /**
+   * Splits details Markdown into ordered segments so text and images render
+   * inline, in the order they appear: [{type:'md',text} | {type:'img',target}].
+   */
+  splitDetailSegments(markdown) {
+    const text = String(markdown || "");
+    const re = /!\[\[([^\]]+)\]\]|!\[[^\]]*\]\(([^)]+)\)/g;
+    const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)(\?|#|$)/i;
+    const segments = [];
+    let last = 0;
+    let match;
+    while ((match = re.exec(text))) {
+      const isWiki = match[1] !== undefined;
+      let target = (isWiki ? match[1] : match[2]) || "";
+      target = target.split("|")[0].split("#")[0].trim();
+      if (!isWiki) target = target.split(/\s+/)[0]; // md link: drop optional "title"
+      if (!IMG_EXT.test(target)) continue; // not an image link — leave it in the text
+      if (match.index > last) segments.push({ type: "md", text: text.slice(last, match.index) });
+      segments.push({ type: "img", target });
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) segments.push({ type: "md", text: text.slice(last) });
+    if (!segments.length) segments.push({ type: "md", text });
+    return segments;
+  }
+
+  /**
    * Shows rendered Markdown by default, with a textarea editor on demand.
    */
   renderDetailsField() {
@@ -1077,35 +1103,66 @@ class CardModal extends Modal {
         return;
       }
 
-      // Render the whole note — text AND images — inline, in order, as one
-      // flowing document (like Trello), then fill any image embeds.
+      // Render the note as ONE flowing document: split into ordered text/image
+      // segments, render text via Markdown and images ourselves (MarkdownRenderer
+      // doesn't reliably turn ![[img]] into a real image inside a modal). This
+      // keeps each image exactly where it was added, inline with the text.
       const body = createElement("div", "ot-details-body");
       preview.append(body);
-      try {
-        Promise.resolve(
-          MarkdownRenderer.render(this.app, markdown, body, this.card.filePath || "", this)
-        )
-          .then(() => {
-            this.hydrateImageEmbeds(body);
-            // Collapse long descriptions behind a "Show more" toggle.
-            requestAnimationFrame(() => {
-              if (body.scrollHeight > COLLAPSED_MAX + 48) {
-                body.classList.add("is-clamped");
-                const more = createElement("button", "ot-details-more", "Show more");
-                more.type = "button";
-                more.addEventListener("click", (event) => {
-                  event.stopPropagation();
-                  const collapsed = body.classList.toggle("is-clamped");
-                  more.textContent = collapsed ? "Show more" : "Show less";
-                });
-                preview.append(more);
-              }
+      this.splitDetailSegments(markdown).forEach((seg) => {
+        if (seg.type === "img") {
+          const resolved = this.plugin.resolveCardImage(this.card, seg.target);
+          const wrap = createElement("div", "ot-inline-image");
+          if (resolved && resolved.src) {
+            const img = createElement("img", "");
+            img.src = resolved.src;
+            img.alt = resolved.name || "";
+            img.loading = "lazy";
+            img.addEventListener("click", (event) => {
+              event.stopPropagation();
+              if (resolved.file) this.app.workspace.getLeaf(false).openFile(resolved.file);
+              else if (resolved.src) window.open(resolved.src, "_blank");
             });
-          })
-          .catch((error) => renderPreviewFallback(markdown, error));
-      } catch (error) {
-        renderPreviewFallback(markdown, error);
-      }
+            wrap.append(img);
+          } else {
+            wrap.append(createElement("span", "ot-image-missing", seg.target.split("/").pop() || "image"));
+          }
+          body.append(wrap);
+          return;
+        }
+        const text = seg.text.trim();
+        if (!text) return;
+        const chunk = createElement("div", "ot-md-chunk");
+        body.append(chunk);
+        try {
+          Promise.resolve(
+            MarkdownRenderer.render(this.app, text, chunk, this.card.filePath || "", this)
+          ).catch((error) => {
+            console.error(error);
+            chunk.textContent = text;
+          });
+        } catch (error) {
+          chunk.textContent = text;
+        }
+      });
+
+      // Collapse a long description behind a "Show more" toggle. Re-checked once
+      // more after a moment so late-loading images are counted.
+      const applyClamp = () => {
+        if (preview.querySelector(".ot-details-more")) return;
+        if (body.scrollHeight <= COLLAPSED_MAX + 48) return;
+        body.classList.add("is-clamped");
+        const more = createElement("button", "ot-details-more", "Show more");
+        more.type = "button";
+        more.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const collapsed = body.classList.toggle("is-clamped");
+          more.textContent = collapsed ? "Show more" : "Show less";
+        });
+        preview.append(more);
+      };
+      requestAnimationFrame(applyClamp);
+      window.setTimeout(applyClamp, 400);
     };
 
     const showEditor = () => {

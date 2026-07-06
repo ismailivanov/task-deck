@@ -1503,6 +1503,18 @@
   text-decoration: underline;
 }
 
+.ot-inline-image img {
+  cursor: zoom-in;
+}
+
+.ot-image-missing {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.ot-md-chunk > :first-child { margin-top: 0; }
+.ot-md-chunk > :last-child { margin-bottom: 0; }
+
 /* Drag-over hint while dropping an image onto the details field. */
 .ot-field.is-image-drag .ot-markdown-preview,
 .ot-field.is-image-drag .ot-details-editor {
