@@ -369,6 +369,48 @@
   color: var(--text-muted);
 }
 
+.ot-card-image-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: -2px -2px 0;
+}
+
+.ot-card-image-strip.is-single {
+  grid-template-columns: 1fr;
+}
+
+.ot-card-image-thumb {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--background-secondary);
+}
+
+.ot-card-image-strip.is-single .ot-card-image-thumb {
+  aspect-ratio: 16 / 9;
+}
+
+.ot-card-image-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ot-card-image-more {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: white;
+  background: rgb(0 0 0 / 48%);
+  font-size: 18px;
+  font-weight: 900;
+}
+
 .ot-card.is-just-completed {
   z-index: 1;
   animation: ot-complete-card-pulse 560ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -1152,6 +1194,286 @@
   min-height: 220px;
 }
 
+.ot-details-field {
+  gap: 12px;
+}
+
+.ot-details-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ot-details-heading-title {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  color: var(--text-normal);
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.ot-details-heading-icon {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  color: var(--text-muted);
+}
+
+.ot-details-edit-button {
+  min-height: 36px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: transparent;
+  font-weight: 800;
+}
+
+.ot-details-edit-button:hover {
+  border-color: var(--background-modifier-border-hover);
+  background: var(--background-modifier-hover);
+}
+
+.ot-trello-editor {
+  border: 2px solid var(--interactive-accent);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--background-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+}
+
+.ot-details-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 52px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 6px 10px;
+  background: var(--background-secondary);
+}
+
+.ot-details-toolbar-group {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.ot-details-tool {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+
+.ot-details-tool:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.ot-details-text-tool {
+  border: 0;
+  background: transparent;
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ot-details-text-tool[aria-label="Italic"] {
+  font-style: italic;
+}
+
+.ot-trello-editor .ot-image-gallery.is-editing {
+  padding: 10px 12px 0;
+}
+
+.ot-trello-editor .ot-details-editor {
+  display: block;
+  width: 100%;
+  min-height: 280px;
+  border: 0;
+  border-radius: 0;
+  padding: 18px 20px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  resize: vertical;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.ot-trello-editor .ot-details-editor:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.ot-details-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.ot-details-actions button {
+  min-height: 36px;
+  border-radius: 8px;
+  font-weight: 800;
+}
+
+.ot-image-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ot-image-gallery.is-empty {
+  display: none;
+}
+
+.ot-image-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.ot-image-gallery.is-preview {
+  margin: 4px 0 14px;
+}
+
+.ot-image-gallery.is-preview .ot-image-gallery-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ot-image-item {
+  position: relative;
+  min-width: 0;
+}
+
+.ot-image-tile {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--background-secondary);
+  cursor: zoom-in;
+}
+
+.ot-image-tile:hover {
+  border-color: var(--background-modifier-border-hover);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+}
+
+.ot-image-gallery.is-preview .ot-image-tile {
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ot-image-gallery.is-preview .ot-image-tile:hover {
+  box-shadow: none;
+}
+
+.ot-image-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ot-image-gallery.is-preview .ot-image-tile img {
+  height: auto;
+  max-height: 560px;
+  border-radius: 10px;
+  background: var(--background-primary);
+  object-fit: contain;
+}
+
+/* Editing gallery mirrors the preview: show the whole image (contained), not a
+   cropped/overflowing tile — capped a little shorter so the editor stays handy. */
+.ot-trello-editor .ot-image-gallery.is-editing .ot-image-gallery-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ot-image-gallery.is-editing .ot-image-tile {
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 10px;
+  background: var(--background-primary);
+  box-shadow: none;
+}
+
+.ot-image-gallery.is-editing .ot-image-tile img {
+  height: auto;
+  max-height: 320px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.ot-image-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  color: white;
+  background: rgb(0 0 0 / 58%);
+  backdrop-filter: blur(4px);
+}
+
+.ot-image-remove:hover {
+  color: white;
+  background: rgb(0 0 0 / 78%);
+}
+
+.ot-image-info {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: #f3f4f6;
+  background: rgb(0 0 0 / 72%);
+  backdrop-filter: blur(4px);
+}
+
+.ot-image-info:hover {
+  color: #fff;
+  background: rgb(0 0 0 / 86%);
+}
+
+.ot-image-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.ot-markdown-fallback {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
 .ot-markdown-preview {
   min-height: 120px;
   border: 1px solid var(--background-modifier-border);
@@ -1355,6 +1677,15 @@
 
   .ot-label-color-grid {
     grid-template-columns: repeat(3, minmax(44px, 1fr));
+  }
+
+  .ot-details-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ot-details-toolbar-group {
+    flex-wrap: wrap;
   }
 }
 

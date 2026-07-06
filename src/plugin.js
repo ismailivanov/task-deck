@@ -18,6 +18,8 @@ const {
   labelKey,
   labelsToFrontmatter,
   assigneesToFrontmatter,
+  imageRefsFromMarkdown,
+  isImagePath,
   parseCardMarkdown,
   encodeListMeta,
   decodeListMeta,
@@ -487,6 +489,30 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       .filter((a) => a && a.email)
       .filter((a) => (seen.has(a.email) ? false : seen.add(a.email)))
       .map((a) => ({ email: String(a.email), name: a.name || a.email, color: a.color || "#8b5cf6" }));
+  }
+
+  cardImageRefs(card) {
+    return imageRefsFromMarkdown(card && card.details);
+  }
+
+  resolveCardImage(card, ref) {
+    const target = typeof ref === "string" ? ref : ref && ref.target;
+    if (!target) return null;
+    if (/^https?:\/\//i.test(target)) {
+      return { src: target, name: target.split("/").pop() || "Image", file: null };
+    }
+
+    const sourcePath = (card && card.filePath) || "";
+    let file = this.app.vault.getAbstractFileByPath(target);
+    if (!file && this.app.metadataCache && this.app.metadataCache.getFirstLinkpathDest) {
+      try {
+        file = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+      } catch (error) {
+        file = null;
+      }
+    }
+    if (!file || !isImagePath(file.path || file.name)) return null;
+    return { src: this.app.vault.getResourcePath(file), name: file.name, file };
   }
 
   // Presence responses carry both the cursor roster (users) and the card-lock

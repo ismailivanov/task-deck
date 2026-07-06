@@ -19,6 +19,7 @@ const TASK_DECK_ICON_SVG = `
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
 const DONATION_URL = "https://buymeacoffee.com/carbon06";
 const RELAY_URL = "https://community.obsidian.md/plugins/system3-relay";
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 const DEFAULT_LABEL_COLOR = "#2f6fd6";
 const LABEL_COLORS = [
   "#1f6f4a", "#8a6f00", "#a64b00", "#8b2a24", "#6f338f",
@@ -157,6 +158,49 @@ function taskDeckListTag(boardName, listTitle) {
   return `task-deck/${tagPart(boardName)}/${tagPart(listTitle)}`;
 }
 
+function imageTarget(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/^<|>$/g, "")
+    .split("|")[0]
+    .split("#")[0]
+    .split("?")[0]
+    .trim();
+}
+
+function isImagePath(value) {
+  const match = imageTarget(value).toLowerCase().match(/\.([a-z0-9]+)$/);
+  return !!(match && IMAGE_EXTENSIONS.includes(match[1]));
+}
+
+function imageRefsFromMarkdown(markdown) {
+  const text = String(markdown || "");
+  const refs = [];
+  let match;
+
+  const wikiRe = /!\[\[([^\]]+)\]\]/g;
+  while ((match = wikiRe.exec(text))) {
+    const target = imageTarget(match[1]);
+    if (isImagePath(target)) refs.push({ target, markup: match[0] });
+  }
+
+  const mdRe = /!\[[^\]]*]\(([^)]+)\)/g;
+  while ((match = mdRe.exec(text))) {
+    const target = imageTarget(match[1]);
+    if (isImagePath(target) || /^https?:\/\//i.test(target)) refs.push({ target, markup: match[0] });
+  }
+
+  return refs;
+}
+
+function stripImageEmbeds(markdown) {
+  let text = String(markdown || "");
+  imageRefsFromMarkdown(text).forEach((ref) => {
+    text = text.replace(ref.markup, "");
+  });
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -192,6 +236,8 @@ const ICON_FALLBACKS = {
   "square-check": { rects: [{ x: 3, y: 3, width: 18, height: 18, rx: 3 }], paths: ["M8 12l3 3 5-6"] },
   "calendar-days": { rects: [{ x: 3, y: 4, width: 18, height: 17, rx: 2 }], paths: ["M8 2v4", "M16 2v4", "M3 10h18", "M8 14h.01", "M12 14h.01", "M16 14h.01", "M8 18h.01", "M12 18h.01"] },
   clock: { circles: [{ cx: 12, cy: 12, r: 9 }], paths: ["M12 7v5l3 2"] },
+  bold: { paths: ["M7 5h6a4 4 0 0 1 0 8H7Z", "M7 13h7a4 4 0 0 1 0 8H7Z"] },
+  italic: { paths: ["M19 4h-9", "M14 20H5", "M15 4 9 20"] },
   ellipsis: { circles: [{ cx: 6, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 12, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 18, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }] },
   "more-horizontal": { circles: [{ cx: 6, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 12, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 18, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }] },
   "grip-vertical": {
@@ -211,6 +257,12 @@ const ICON_FALLBACKS = {
       { x: 14, y: 14, width: 6, height: 6, rx: 1 },
     ],
   },
+  list: { paths: ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"] },
+  link: { paths: ["M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1", "M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"] },
+  image: { rects: [{ x: 3, y: 5, width: 18, height: 14, rx: 2 }], circles: [{ cx: 8.5, cy: 10, r: 1.5 }], paths: ["M21 15l-5-5L5 19"] },
+  paperclip: { paths: ["M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 1 1 5.7 5.7l-10 10a2 2 0 1 1-2.8-2.8l9.4-9.4"] },
+  "help-circle": { circles: [{ cx: 12, cy: 12, r: 9 }], paths: ["M9.1 9a3 3 0 1 1 5.8 1c-.9 1.2-2.4 1.5-2.8 3", "M12 17h.01"] },
+  type: { paths: ["M4 7V4h16v3", "M9 20h6", "M12 4v16"] },
   "file-text": { paths: ["M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z", "M14 3v6h6", "M8 13h8", "M8 17h5"] },
   "refresh-cw": { paths: ["M21 12a9 9 0 0 1-15 6.7", "M3 12A9 9 0 0 1 18 5.3", "M18 3v5h-5", "M6 21v-5h5"] },
   settings: { circles: [{ cx: 12, cy: 12, r: 3 }], paths: ["M12 2v3", "M12 19v3", "M4.9 4.9 7 7", "M17 17l2.1 2.1", "M2 12h3", "M19 12h3", "M4.9 19.1 7 17", "M17 7l2.1-2.1"] },
@@ -508,6 +560,7 @@ module.exports = {
   LIST_DRAG_TYPE,
   DONATION_URL,
   RELAY_URL,
+  IMAGE_EXTENSIONS,
   DEFAULT_LABEL_COLOR,
   LABEL_COLORS,
   LIST_COLORS,
@@ -528,6 +581,10 @@ module.exports = {
   cleanLabelName,
   cardFileBaseName,
   taskDeckListTag,
+  imageTarget,
+  isImagePath,
+  imageRefsFromMarkdown,
+  stripImageEmbeds,
   createElement,
   hasDragType,
   iconButton,

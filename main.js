@@ -22,6 +22,7 @@ const TASK_DECK_ICON_SVG = `
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
 const DONATION_URL = "https://buymeacoffee.com/carbon06";
 const RELAY_URL = "https://community.obsidian.md/plugins/system3-relay";
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 const DEFAULT_LABEL_COLOR = "#2f6fd6";
 const LABEL_COLORS = [
   "#1f6f4a", "#8a6f00", "#a64b00", "#8b2a24", "#6f338f",
@@ -160,6 +161,49 @@ function taskDeckListTag(boardName, listTitle) {
   return `task-deck/${tagPart(boardName)}/${tagPart(listTitle)}`;
 }
 
+function imageTarget(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/^<|>$/g, "")
+    .split("|")[0]
+    .split("#")[0]
+    .split("?")[0]
+    .trim();
+}
+
+function isImagePath(value) {
+  const match = imageTarget(value).toLowerCase().match(/\.([a-z0-9]+)$/);
+  return !!(match && IMAGE_EXTENSIONS.includes(match[1]));
+}
+
+function imageRefsFromMarkdown(markdown) {
+  const text = String(markdown || "");
+  const refs = [];
+  let match;
+
+  const wikiRe = /!\[\[([^\]]+)\]\]/g;
+  while ((match = wikiRe.exec(text))) {
+    const target = imageTarget(match[1]);
+    if (isImagePath(target)) refs.push({ target, markup: match[0] });
+  }
+
+  const mdRe = /!\[[^\]]*]\(([^)]+)\)/g;
+  while ((match = mdRe.exec(text))) {
+    const target = imageTarget(match[1]);
+    if (isImagePath(target) || /^https?:\/\//i.test(target)) refs.push({ target, markup: match[0] });
+  }
+
+  return refs;
+}
+
+function stripImageEmbeds(markdown) {
+  let text = String(markdown || "");
+  imageRefsFromMarkdown(text).forEach((ref) => {
+    text = text.replace(ref.markup, "");
+  });
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -195,6 +239,8 @@ const ICON_FALLBACKS = {
   "square-check": { rects: [{ x: 3, y: 3, width: 18, height: 18, rx: 3 }], paths: ["M8 12l3 3 5-6"] },
   "calendar-days": { rects: [{ x: 3, y: 4, width: 18, height: 17, rx: 2 }], paths: ["M8 2v4", "M16 2v4", "M3 10h18", "M8 14h.01", "M12 14h.01", "M16 14h.01", "M8 18h.01", "M12 18h.01"] },
   clock: { circles: [{ cx: 12, cy: 12, r: 9 }], paths: ["M12 7v5l3 2"] },
+  bold: { paths: ["M7 5h6a4 4 0 0 1 0 8H7Z", "M7 13h7a4 4 0 0 1 0 8H7Z"] },
+  italic: { paths: ["M19 4h-9", "M14 20H5", "M15 4 9 20"] },
   ellipsis: { circles: [{ cx: 6, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 12, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 18, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }] },
   "more-horizontal": { circles: [{ cx: 6, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 12, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }, { cx: 18, cy: 12, r: 1.4, fill: "currentColor", stroke: "none" }] },
   "grip-vertical": {
@@ -214,6 +260,12 @@ const ICON_FALLBACKS = {
       { x: 14, y: 14, width: 6, height: 6, rx: 1 },
     ],
   },
+  list: { paths: ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"] },
+  link: { paths: ["M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1", "M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"] },
+  image: { rects: [{ x: 3, y: 5, width: 18, height: 14, rx: 2 }], circles: [{ cx: 8.5, cy: 10, r: 1.5 }], paths: ["M21 15l-5-5L5 19"] },
+  paperclip: { paths: ["M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 1 1 5.7 5.7l-10 10a2 2 0 1 1-2.8-2.8l9.4-9.4"] },
+  "help-circle": { circles: [{ cx: 12, cy: 12, r: 9 }], paths: ["M9.1 9a3 3 0 1 1 5.8 1c-.9 1.2-2.4 1.5-2.8 3", "M12 17h.01"] },
+  type: { paths: ["M4 7V4h16v3", "M9 20h6", "M12 4v16"] },
   "file-text": { paths: ["M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z", "M14 3v6h6", "M8 13h8", "M8 17h5"] },
   "refresh-cw": { paths: ["M21 12a9 9 0 0 1-15 6.7", "M3 12A9 9 0 0 1 18 5.3", "M18 3v5h-5", "M6 21v-5h5"] },
   settings: { circles: [{ cx: 12, cy: 12, r: 3 }], paths: ["M12 2v3", "M12 19v3", "M4.9 4.9 7 7", "M17 17l2.1 2.1", "M2 12h3", "M19 12h3", "M4.9 19.1 7 17", "M17 7l2.1-2.1"] },
@@ -511,6 +563,7 @@ module.exports = {
   LIST_DRAG_TYPE,
   DONATION_URL,
   RELAY_URL,
+  IMAGE_EXTENSIONS,
   DEFAULT_LABEL_COLOR,
   LABEL_COLORS,
   LIST_COLORS,
@@ -531,6 +584,10 @@ module.exports = {
   cleanLabelName,
   cardFileBaseName,
   taskDeckListTag,
+  imageTarget,
+  isImagePath,
+  imageRefsFromMarkdown,
+  stripImageEmbeds,
   createElement,
   hasDragType,
   iconButton,
@@ -564,6 +621,7 @@ const {
   addMonths,
   addButtonIcon,
   checklistStats,
+  cardFileBaseName,
   cleanDate,
   cleanColor,
   cleanLabelName,
@@ -572,8 +630,10 @@ const {
   dateFromISO,
   fieldDateLabel,
   iconButton,
+  imageRefsFromMarkdown,
   isoFromDate,
   labelKey,
+  stripImageEmbeds,
   textButton,
   textLine,
   initials,
@@ -604,6 +664,14 @@ function imageStamp() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function safeImageFileName(rawName, fallbackExt) {
+  const clean = textLine(rawName);
+  const match = clean.match(/\.([a-z0-9]+)$/i);
+  const ext = textLine(match ? match[1] : fallbackExt || "png").replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
+  const base = match ? clean.slice(0, -match[0].length) : clean;
+  return `${cardFileBaseName(base || `Pasted image ${imageStamp()}`)}.${ext}`;
 }
 
 /**
@@ -1214,6 +1282,8 @@ class CardModal extends Modal {
     this.localLabels = [];
     this.localGlobalLabels = [];
     this.localDetails = "";
+    this.detailsDraft = "";
+    this.editingDetails = false;
     this.localChecklist = [];
     this.detailsTextarea = null;
     this.addingChecklistItem = false;
@@ -1253,6 +1323,8 @@ class CardModal extends Modal {
     this.localGlobalLabels = clone(this.plugin.data.labels || []);
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
     this.localDetails = card.details || "";
+    this.detailsDraft = "";
+    this.editingDetails = false;
     this.localChecklist = clone(card.checklist || []);
     this.localAssignees = clone(card.assignees || []);
     await this.setupCardLock();
@@ -1471,7 +1543,7 @@ class CardModal extends Modal {
       title.disabled = true;
       deleteButton.disabled = true;
       this.disableEditing([labelsField, assigneesField, detailsField, checklistField]);
-    } else {
+    } else if (!this.editingDetails) {
       requestAnimationFrame(() => title.focus());
     }
   }
@@ -1481,6 +1553,7 @@ class CardModal extends Modal {
   disableEditing(fields) {
     fields.forEach((field) => {
       field.querySelectorAll("input, textarea, button, [contenteditable]").forEach((el) => {
+        if (el.classList.contains("ot-image-tile")) return;
         if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "BUTTON") {
           el.disabled = true;
         } else {
@@ -1543,19 +1616,36 @@ class CardModal extends Modal {
     return field;
   }
 
+  currentDetailsText() {
+    return this.editingDetails ? this.detailsDraft : this.localDetails;
+  }
+
   /**
    * Shows rendered Markdown by default, with a textarea editor on demand.
    */
   renderDetailsField() {
-    const field = createElement("div", "ot-field");
-    const header = createElement("div", "ot-field-row");
-    header.append(createElement("span", "", "Details"));
-    field.append(header);
-
+    const field = createElement("section", "ot-field ot-details-field");
+    const header = createElement("div", "ot-details-heading");
+    const heading = createElement("div", "ot-details-heading-title");
+    const headingIcon = createElement("span", "ot-details-heading-icon");
+    try {
+      setIcon(headingIcon, "align-left");
+    } catch (error) {
+      headingIcon.textContent = "";
+    }
+    heading.append(headingIcon, createElement("span", "", "Description"));
+    const gallery = createElement("div", "ot-image-gallery");
     const preview = createElement("div", "ot-markdown-preview");
     const editor = createElement("textarea", "ot-textarea ot-details-editor is-hidden");
-    editor.placeholder = "Card notes…";
-    editor.value = this.localDetails;
+    const isEditing = !this.readOnly && (this.editingDetails || !this.localDetails.trim());
+
+    if (isEditing && !this.editingDetails) {
+      this.editingDetails = true;
+      this.detailsDraft = this.localDetails;
+    }
+
+    editor.placeholder = "Write a description...";
+    editor.value = isEditing ? this.detailsDraft : this.localDetails;
     this.detailsTextarea = editor;
     this.detailsPreview = preview;
 
@@ -1578,46 +1668,132 @@ class CardModal extends Modal {
       if (files.length) insertImagesSequentially(files).catch(console.error);
     });
 
+    const renderGallery = () => {
+      this.renderImageGallery(gallery, () => {
+        renderGallery();
+        renderPreview();
+      });
+    };
+
+    const renderPreviewFallback = (markdown, error) => {
+      if (error) console.error(error);
+      preview.replaceChildren();
+      preview.append(createElement("pre", "ot-markdown-fallback", markdown || "Could not render details."));
+    };
+
     const renderPreview = () => {
       preview.replaceChildren();
-      if (!this.localDetails.trim()) {
+      const markdown = stripImageEmbeds(this.currentDetailsText());
+      const hasImages = imageRefsFromMarkdown(this.currentDetailsText()).length > 0;
+      preview.classList.remove("is-hidden");
+      if (!markdown) {
+        if (hasImages) {
+          preview.classList.add("is-hidden");
+          return;
+        }
         preview.append(createElement("span", "ot-empty-text", "No details"));
         return;
       }
 
-      Promise.resolve(
-        MarkdownRenderer.render(this.app, this.localDetails, preview, this.card.filePath || "", this)
-      ).then(() => this.hydrateImageEmbeds(preview)).catch(console.error);
+      try {
+        Promise.resolve(
+          MarkdownRenderer.render(this.app, markdown, preview, this.card.filePath || "", this)
+        )
+          .then(() => this.hydrateImageEmbeds(preview))
+          .catch((error) => renderPreviewFallback(markdown, error));
+      } catch (error) {
+        renderPreviewFallback(markdown, error);
+      }
     };
 
     const showEditor = () => {
-      editor.value = this.localDetails;
-      preview.classList.add("is-hidden");
-      editor.classList.remove("is-hidden");
-      requestAnimationFrame(() => editor.focus());
+      if (this.readOnly) return;
+      this.editingDetails = true;
+      this.detailsDraft = this.localDetails;
+      this.render();
     };
 
-    const showPreview = () => {
-      this.localDetails = editor.value;
-      editor.classList.add("is-hidden");
-      preview.classList.remove("is-hidden");
+    const saveDetails = async () => {
+      this.localDetails = editor.value.trim();
+      this.detailsDraft = "";
+      this.editingDetails = false;
+      await this.saveNow();
+      this.render();
+    };
+
+    const cancelDetails = () => {
+      this.detailsDraft = "";
+      this.editingDetails = false;
+      this.render();
+    };
+    this.showDetailsPreview = () => {
+      renderGallery();
       renderPreview();
     };
-    this.showDetailsPreview = showPreview;
 
-    header.append(
-      iconButton("image", "Add image", () => { if (!this.readOnly) imageInput.click(); }),
-      iconButton("pencil", "Edit details", showEditor)
-    );
-    preview.addEventListener("click", showEditor);
-    editor.addEventListener("input", () => {
-      this.localDetails = editor.value;
-      this.queueSave();
-    });
-    editor.addEventListener("blur", () => {
-      showPreview();
-      this.saveNow().catch(console.error);
-    });
+    const makeTool = (icon, label, onClick) => {
+      const button = iconButton(icon, label, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      });
+      button.classList.add("ot-details-tool");
+      return button;
+    };
+
+    const makeTextTool = (label, title, onClick) => {
+      const button = createElement("button", "ot-details-tool ot-details-text-tool", label);
+      button.type = "button";
+      button.title = title;
+      button.setAttribute("aria-label", title);
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      });
+      return button;
+    };
+
+    const setEditorText = (value, start, end) => {
+      editor.value = value;
+      this.detailsDraft = value;
+      editor.selectionStart = start;
+      editor.selectionEnd = end;
+      renderGallery();
+      editor.focus();
+    };
+
+    const wrapSelection = (before, after, placeholder) => {
+      const start = editor.selectionStart || 0;
+      const end = editor.selectionEnd || start;
+      const selected = editor.value.slice(start, end) || placeholder;
+      const next = editor.value.slice(0, start) + before + selected + after + editor.value.slice(end);
+      setEditorText(next, start + before.length, start + before.length + selected.length);
+    };
+
+    const prefixLines = (prefix) => {
+      const start = editor.selectionStart || 0;
+      const end = editor.selectionEnd || start;
+      const lineStart = editor.value.lastIndexOf("\n", start - 1) + 1;
+      const lineEndIndex = editor.value.indexOf("\n", end);
+      const lineEnd = lineEndIndex === -1 ? editor.value.length : lineEndIndex;
+      const block = editor.value.slice(lineStart, lineEnd) || "";
+      const nextBlock = block.split("\n").map((line) => (line.startsWith(prefix) ? line : `${prefix}${line || " "}`)).join("\n");
+      const next = editor.value.slice(0, lineStart) + nextBlock + editor.value.slice(lineEnd);
+      setEditorText(next, lineStart, lineStart + nextBlock.length);
+    };
+
+    const insertBlock = (text) => {
+      const start = editor.selectionStart || editor.value.length;
+      const end = editor.selectionEnd || start;
+      const before = editor.value.slice(0, start);
+      const after = editor.value.slice(end);
+      const prefix = before && !before.endsWith("\n") ? "\n" : "";
+      const suffix = after && !after.startsWith("\n") ? "\n" : "";
+      const inserted = `${prefix}${text}${suffix}`;
+      const next = before + inserted + after;
+      setEditorText(next, start + inserted.length, start + inserted.length);
+    };
 
     // Paste or drop an image straight into the notes: it's saved into the vault
     // (respecting the attachment-folder setting) and embedded compactly.
@@ -1645,7 +1821,6 @@ class CardModal extends Modal {
       }
       insertImagesSequentially(images).catch(console.error);
     };
-    editor.addEventListener("paste", handlePaste);
     // Handlers live on the whole field so crossing between the preview/editor and
     // their own children (e.g. an embedded image) never flickers the hint.
     field.addEventListener("dragover", (event) => {
@@ -1658,9 +1833,145 @@ class CardModal extends Modal {
     });
     field.addEventListener("drop", handleDrop);
 
+    if (isEditing) {
+      const toolbar = createElement("div", "ot-details-toolbar");
+      const leftTools = createElement("div", "ot-details-toolbar-group");
+      leftTools.append(
+        makeTextTool("Tt", "Heading", () => prefixLines("### ")),
+        makeTextTool("B", "Bold", () => wrapSelection("**", "**", "bold text")),
+        makeTextTool("I", "Italic", () => wrapSelection("*", "*", "italic text")),
+        makeTool("ellipsis", "More", () => insertBlock("> ")),
+        makeTool("list", "List", () => prefixLines("- ")),
+        makeTool("link", "Link", () => wrapSelection("[", "](https://)", "link")),
+        makeTool("image", "Add image", () => imageInput.click()),
+        makeTool("plus", "Divider", () => insertBlock("---"))
+      );
+
+      const rightTools = createElement("div", "ot-details-toolbar-group");
+      rightTools.append(
+        makeTool("paperclip", "Attach image", () => imageInput.click()),
+        makeTextTool("M", "Markdown", () => wrapSelection("`", "`", "code")),
+        makeTool("help-circle", "Formatting help", () => new Notice("Markdown: **bold**, *italic*, - list, [link](url)."))
+      );
+      toolbar.append(leftTools, rightTools);
+
+      const editorFrame = createElement("div", "ot-trello-editor");
+      editor.classList.remove("is-hidden");
+      editor.addEventListener("input", () => {
+        this.detailsDraft = editor.value;
+        renderGallery();
+      });
+      editor.addEventListener("paste", handlePaste);
+
+      const actions = createElement("div", "ot-details-actions");
+      const save = createElement("button", "mod-cta", "Save");
+      const cancel = createElement("button", "", "Cancel");
+      addButtonIcon(save, "check");
+      addButtonIcon(cancel, "x");
+      save.type = "button";
+      cancel.type = "button";
+      save.addEventListener("click", () => saveDetails().catch(console.error));
+      cancel.addEventListener("click", cancelDetails);
+      actions.append(save, cancel);
+
+      header.append(heading);
+      renderGallery();
+      editorFrame.append(toolbar, gallery, editor);
+      field.append(header, editorFrame, actions, imageInput);
+      requestAnimationFrame(() => editor.focus());
+      return field;
+    }
+
+    header.append(heading);
+    if (!this.readOnly) header.append(textButton("pencil", "Edit", showEditor, "ot-details-edit-button"));
+    preview.addEventListener("click", showEditor);
+    renderGallery();
     renderPreview();
-    field.append(preview, editor, imageInput);
+    field.append(gallery, preview, editor, imageInput);
+    field.prepend(header);
     return field;
+  }
+
+  renderImageGallery(container, onChange) {
+    const refs = imageRefsFromMarkdown(this.currentDetailsText());
+    container.replaceChildren();
+    container.classList.toggle("is-empty", !refs.length);
+    container.classList.toggle("is-editing", !!this.editingDetails);
+    container.classList.toggle("is-preview", !this.editingDetails);
+    if (!refs.length) return;
+
+    const grid = createElement("div", "ot-image-gallery-grid");
+    refs.forEach((ref) => {
+      const resolved = this.plugin.resolveCardImage(this.card, ref);
+      const item = createElement("div", "ot-image-item");
+      const tile = createElement("button", "ot-image-tile");
+      tile.type = "button";
+
+      if (resolved && resolved.src) {
+        const img = createElement("img", "");
+        img.src = resolved.src;
+        img.alt = resolved.name || "";
+        img.loading = "lazy";
+        tile.append(img);
+      } else {
+        tile.append(createElement("span", "ot-image-missing", ref.target.split("/").pop() || "Image"));
+      }
+
+      tile.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.openImageRef(ref);
+      });
+      item.append(tile);
+
+      if (this.editingDetails && !this.readOnly) {
+        const remove = iconButton("x", "Remove image", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.removeImageRef(ref);
+          onChange();
+          if (this.editingDetails) return;
+          await this.saveNow();
+        });
+        remove.classList.add("ot-image-remove");
+        item.append(remove);
+      } else if (resolved && resolved.file) {
+        const info = iconButton("info", "Open image", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.openImageRef(ref);
+        });
+        info.classList.add("ot-image-info");
+        item.append(info);
+      }
+
+      grid.append(item);
+    });
+    container.append(grid);
+  }
+
+  openImageRef(ref) {
+    const resolved = this.plugin.resolveCardImage(this.card, ref);
+    if (resolved && resolved.file) {
+      this.app.workspace.getLeaf(false).openFile(resolved.file);
+    } else if (resolved && resolved.src) {
+      window.open(resolved.src, "_blank");
+    }
+  }
+
+  removeImageRef(ref) {
+    if (this.readOnly || !ref || !ref.markup) return;
+    const next = String(this.currentDetailsText() || "")
+      .replace(ref.markup, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (this.editingDetails) {
+      this.detailsDraft = next;
+    } else {
+      this.localDetails = next;
+    }
+    if (this.detailsTextarea) this.detailsTextarea.value = next;
   }
 
   /**
@@ -1671,7 +1982,7 @@ class CardModal extends Modal {
     const ta = this.detailsTextarea;
     if (!ta || this.readOnly) return false;
     if (ta.classList.contains("is-hidden")) {
-      ta.value = this.localDetails;
+      ta.value = this.currentDetailsText();
       if (this.detailsPreview) this.detailsPreview.classList.add("is-hidden");
       ta.classList.remove("is-hidden");
     }
@@ -1685,9 +1996,13 @@ class CardModal extends Modal {
     ta.value = before + inserted + after;
     const caret = start + inserted.length;
     ta.selectionStart = ta.selectionEnd = caret;
-    this.localDetails = ta.value;
+    if (this.editingDetails) {
+      this.detailsDraft = ta.value;
+    } else {
+      this.localDetails = ta.value;
+      this.queueSave();
+    }
     ta.focus();
-    this.queueSave();
     return true;
   }
 
@@ -1709,7 +2024,7 @@ class CardModal extends Modal {
         && /\.[a-z0-9]+$/i.test(rawName)
         && rawName.toLowerCase() !== "image.png"
         && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
-      const fileName = realName ? rawName : `Pasted image ${imageStamp()}.${ext}`;
+      const fileName = safeImageFileName(realName ? rawName : `Pasted image ${imageStamp()}.${ext}`, ext);
       const sourcePath = (this.card && this.card.filePath) || "";
       let targetPath = fileName;
       const fm = this.app.fileManager;
@@ -1737,6 +2052,7 @@ class CardModal extends Modal {
         if (created) await this.app.vault.trash(created, false).catch(() => {});
         return;
       }
+      if (this.editingDetails) this.localDetails = this.detailsDraft;
       // Persist the binary and its embed together (not just the debounced save),
       // so a crash right after can't leave an unreferenced attachment.
       await this.saveNow();
@@ -1767,13 +2083,17 @@ class CardModal extends Modal {
    */
   hydrateImageEmbeds(container) {
     const sourcePath = (this.card && this.card.filePath) || "";
-    const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
     container.querySelectorAll(".internal-embed").forEach((embed) => {
       if (embed.querySelector("img")) return; // already loaded
-      const link = embed.getAttribute("src");
+      const link = embed.getAttribute("src") || embed.getAttribute("data-src") || embed.getAttribute("alt");
       if (!link) return;
-      const target = this.app.metadataCache.getFirstLinkpathDest(link, sourcePath);
-      if (!target || !IMAGE_EXT.includes((target.extension || "").toLowerCase())) return;
+      let target = null;
+      try {
+        target = this.app.metadataCache.getFirstLinkpathDest(link.split("|")[0], sourcePath);
+      } catch (error) {
+        target = null;
+      }
+      if (!target || !this.plugin.resolveCardImage(this.card, target.path)) return;
       const img = container.ownerDocument.createElement("img");
       img.src = this.app.vault.getResourcePath(target);
       img.alt = target.name;
@@ -1905,8 +2225,6 @@ class CardModal extends Modal {
    * Sanitizes modal state and writes it through the plugin's card updater.
    */
   cardPatch() {
-    if (this.detailsTextarea) this.localDetails = this.detailsTextarea.value;
-
     return {
       title: textLine(this.localTitle) || this.card.title,
       labels: clone(this.localLabels),
@@ -3000,6 +3318,8 @@ const {
   labelKey,
   labelsToFrontmatter,
   assigneesToFrontmatter,
+  imageRefsFromMarkdown,
+  isImagePath,
   parseCardMarkdown,
   encodeListMeta,
   decodeListMeta,
@@ -3469,6 +3789,30 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       .filter((a) => a && a.email)
       .filter((a) => (seen.has(a.email) ? false : seen.add(a.email)))
       .map((a) => ({ email: String(a.email), name: a.name || a.email, color: a.color || "#8b5cf6" }));
+  }
+
+  cardImageRefs(card) {
+    return imageRefsFromMarkdown(card && card.details);
+  }
+
+  resolveCardImage(card, ref) {
+    const target = typeof ref === "string" ? ref : ref && ref.target;
+    if (!target) return null;
+    if (/^https?:\/\//i.test(target)) {
+      return { src: target, name: target.split("/").pop() || "Image", file: null };
+    }
+
+    const sourcePath = (card && card.filePath) || "";
+    let file = this.app.vault.getAbstractFileByPath(target);
+    if (!file && this.app.metadataCache && this.app.metadataCache.getFirstLinkpathDest) {
+      try {
+        file = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+      } catch (error) {
+        file = null;
+      }
+    }
+    if (!file || !isImagePath(file.path || file.name)) return null;
+    return { src: this.app.vault.getResourcePath(file), name: file.name, file };
   }
 
   // Presence responses carry both the cursor roster (users) and the card-lock
