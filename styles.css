@@ -826,6 +826,17 @@
   gap: 14px;
 }
 
+/* Roomier card modal (closer to Trello) so description + images + checklist
+   have space; the content area scrolls. */
+.modal:has(.ot-card-modal) {
+  width: min(880px, 94vw);
+  max-width: 94vw;
+}
+
+.ot-card-modal {
+  gap: 16px;
+}
+
 .ot-about-modal p {
   margin: 0;
   color: var(--text-muted);
@@ -1333,20 +1344,16 @@
   display: none;
 }
 
+/* Images fill the description width and keep their aspect (no crop, no squish),
+   like a Trello card attachment — part of the modal. Same in edit and preview. */
 .ot-image-gallery-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .ot-image-gallery.is-preview {
   margin: 4px 0 14px;
-}
-
-.ot-image-gallery.is-preview .ot-image-gallery-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
 }
 
 .ot-image-item {
@@ -1357,68 +1364,32 @@
 .ot-image-tile {
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
   padding: 0;
+  border: 0;
+  border-radius: 12px;
   overflow: hidden;
   background: var(--background-secondary);
   cursor: zoom-in;
+  line-height: 0;
 }
 
 .ot-image-tile:hover {
-  border-color: var(--background-modifier-border-hover);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
-}
-
-.ot-image-gallery.is-preview .ot-image-tile {
-  aspect-ratio: auto;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  box-shadow: none;
-}
-
-.ot-image-gallery.is-preview .ot-image-tile:hover {
-  box-shadow: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 22%, transparent);
 }
 
 .ot-image-tile img {
   display: block;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.ot-image-gallery.is-preview .ot-image-tile img {
   height: auto;
-  max-height: 560px;
-  border-radius: 10px;
-  background: var(--background-primary);
+  max-height: 70vh;
   object-fit: contain;
+  border-radius: 12px;
+  background: var(--background-secondary);
 }
 
-/* Editing gallery mirrors the preview: show the whole image (contained), not a
-   cropped/overflowing tile — capped a little shorter so the editor stays handy. */
-.ot-trello-editor .ot-image-gallery.is-editing .ot-image-gallery-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.ot-image-gallery.is-editing .ot-image-tile {
-  aspect-ratio: auto;
-  border: 0;
-  border-radius: 10px;
-  background: var(--background-primary);
-  box-shadow: none;
-}
-
+/* While editing, cap image height a bit so the textarea stays within reach. */
 .ot-image-gallery.is-editing .ot-image-tile img {
-  height: auto;
-  max-height: 320px;
-  border-radius: 10px;
-  object-fit: contain;
+  max-height: 42vh;
 }
 
 .ot-image-remove {
