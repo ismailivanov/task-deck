@@ -347,19 +347,44 @@ function addButtonIcon(button, icon, label) {
 /**
  * Reads a second-level Markdown section body, stopping before the next H2.
  */
-function getSection(markdown, heading) {
+// The real section headings in a card note. A "## ..." line only ends a section
+// when it's one of these AND outside a fenced code block — so a user can write a
+// "## " heading (or a "## " comment inside a ``` block) in Details without the
+// text after it being silently truncated.
+const CARD_SECTION_HEADINGS = ["Details", "Detaylar", "Checklist", "Yapılacaklar", "Kontrol listesi"];
+
+function getSection(markdown, heading, boundaries) {
   const marker = `## ${heading}`;
-  const start = markdown.indexOf(marker);
+  const start = String(markdown || "").indexOf(marker);
   if (start === -1) return "";
 
-  const body = markdown.slice(start + marker.length);
-  const nextHeading = body.search(/\n## /);
-  return (nextHeading === -1 ? body : body.slice(0, nextHeading)).trim();
+  const body = String(markdown).slice(start + marker.length);
+  const boundarySet = Array.isArray(boundaries) && boundaries.length
+    ? new Set(boundaries.map((h) => `## ${h}`))
+    : null;
+
+  const kept = [];
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) { // opening/closing code fence
+      inFence = !inFence;
+      kept.push(line);
+      continue;
+    }
+    if (!inFence) {
+      const isBoundary = boundarySet
+        ? boundarySet.has(line.trim())
+        : /^##\s/.test(line.trimStart());
+      if (isBoundary) break;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n").trim();
 }
 
 function getSectionAny(markdown, headings) {
   for (const heading of headings) {
-    const section = getSection(markdown, heading);
+    const section = getSection(markdown, heading, CARD_SECTION_HEADINGS);
     if (section) return section;
   }
   return "";
