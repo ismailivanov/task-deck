@@ -153,6 +153,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       this.data.activeBoardId = this.findBoard(this.data.activeBoardId)
         ? this.data.activeBoardId
         : (this.data.boards[0] && this.data.boards[0].id) || "";
+      // Collapse any same-id duplicate card files (e.g. a sync split a move into
+      // create+delete) BEFORE renaming, so a duplicate can't cause a name bump.
+      const deduped = await this.dedupeCardFilesById();
       const renamed = await this.normalizeCardFilePaths();
       await this.syncCardsFromFolder();
       // One-time media tidy-up: move loose images/videos into <board>/attachments
@@ -167,7 +170,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       await this.writeBoardIndexFiles();
       await this.syncGraphColorGroups();
       this.updateExplorerColors();
-      if (restored || renamed || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
+      if (restored || renamed || deduped || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
     } finally {
       this.reconciling = false;
     }
@@ -1345,14 +1348,66 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (!targetBoard) return `${cardFileBaseName(title)}.md`;
     await this.ensureBoardFolder(targetBoard);
 
+    // Card notes live in a "cards" subfolder so the board root stays tidy
+    // (index + cards/ + attachments/), Trello-like.
+    const cardsDir = `${targetBoard.folderPath}/cards`;
+    if (!this.app.vault.getAbstractFileByPath(cardsDir)) {
+      await this.app.vault.createFolder(cardsDir).catch(() => {});
+    }
+
     const base = cardFileBaseName(title);
-    let path = `${targetBoard.folderPath}/${base}.md`;
+    let path = `${cardsDir}/${base}.md`;
     let index = 2;
     while (path !== currentPath && this.app.vault.getAbstractFileByPath(path)) {
-      path = `${targetBoard.folderPath}/${base} ${index}.md`;
+      path = `${cardsDir}/${base} ${index}.md`;
       index += 1;
     }
     return path;
+  }
+
+  /**
+   * Two card files sharing one kanban-card-id are the SAME card — e.g. a move
+   * that Sync Deck (a generic file syncer with no rename concept) split into a
+   * create+delete across devices, leaving a duplicate. Keep one canonical file
+   * and send the rest to the recoverable trash. The winner is chosen
+   * deterministically (device-independent) so peers converge instead of fight.
+   */
+  async dedupeCardFilesById() {
+    const byId = new Map();
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (!this.boardForFile(file)) continue; // only card files (never the index)
+      let id = "";
+      try { id = parseCardMarkdown(await this.app.vault.read(file)).id || ""; } catch (error) { id = ""; }
+      if (!id) continue;
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(file);
+    }
+
+    let changed = false;
+    for (const [id, files] of byId) {
+      if (files.length < 2) continue;
+      // Prefer a file under cards/, then the shortest path, then lexicographic —
+      // all device-independent, so every device keeps the same one.
+      files.sort((a, b) => {
+        const aCards = /(^|\/)cards\//.test(a.path) ? 0 : 1;
+        const bCards = /(^|\/)cards\//.test(b.path) ? 0 : 1;
+        if (aCards !== bCards) return aCards - bCards;
+        if (a.path.length !== b.path.length) return a.path.length - b.path.length;
+        return a.path < b.path ? -1 : 1;
+      });
+      const keep = files[0];
+      const card = this.data.cards[id];
+      if (card) card.filePath = keep.path;
+      for (let i = 1; i < files.length; i += 1) {
+        try {
+          await this.app.vault.trash(files[i], false); // recoverable vault .trash
+          changed = true;
+        } catch (error) {
+          console.error("Task Deck: could not de-duplicate card file", files[i].path, error);
+        }
+      }
+    }
+    return changed;
   }
 
   async normalizeCardFilePaths() {
@@ -1366,11 +1421,33 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async normalizeCardFilePath(card) {
     if (!card || !card.title || !card.filePath) return false;
 
-    const nextPath = await this.nextCardPath(card.title, card.filePath, this.findBoardForCard(card));
-    if (nextPath === card.filePath) return false;
-
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
     if (!file || file.extension !== "md") return false;
+
+    const board = this.findBoardForCard(card);
+
+    // If a DIFFERENT file already sits at this card's plain target and carries THIS
+    // card's id, it's the same card that arrived as a create+delete from a sync
+    // (which has no rename concept). Adopt it and trash our copy — never bump to
+    // "<title> 2.md", which would mint a permanent cross-device duplicate.
+    const desired = board && board.folderPath
+      ? `${board.folderPath}/cards/${cardFileBaseName(card.title)}.md`
+      : `${cardFileBaseName(card.title)}.md`;
+    if (desired !== card.filePath) {
+      const occupant = this.app.vault.getAbstractFileByPath(desired);
+      if (occupant && occupant.path !== card.filePath && occupant.extension === "md") {
+        let occId = "";
+        try { occId = parseCardMarkdown(await this.app.vault.read(occupant)).id || ""; } catch (error) { occId = ""; }
+        if (occId && occId === card.id) {
+          await this.app.vault.trash(file, false); // recoverable
+          card.filePath = desired;
+          return true;
+        }
+      }
+    }
+
+    const nextPath = await this.nextCardPath(card.title, card.filePath, board);
+    if (nextPath === card.filePath) return false;
 
     await this.app.vault.rename(file, nextPath);
     card.filePath = nextPath;
