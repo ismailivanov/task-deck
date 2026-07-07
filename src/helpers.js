@@ -43,6 +43,7 @@ const DEFAULT_DATA = {
   activeBoardId: "",
   completionSound: true,
   compactLabels: false,
+  layoutMigrated: false,
   boards: [],
   cards: {},
   labels: [],

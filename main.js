@@ -46,6 +46,7 @@ const DEFAULT_DATA = {
   activeBoardId: "",
   completionSound: true,
   compactLabels: false,
+  layoutMigrated: false,
   boards: [],
   cards: {},
   labels: [],
@@ -2091,16 +2092,16 @@ class CardModal extends Modal {
         && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
       const fileName = safeImageFileName(realName ? rawName : `Pasted image ${imageStamp()}.${ext}`, ext);
       const sourcePath = (this.card && this.card.filePath) || "";
-      let targetPath = fileName;
-      const fm = this.app.fileManager;
-      if (fm && typeof fm.getAvailablePathForAttachment === "function") {
-        targetPath = await fm.getAvailablePathForAttachment(fileName, sourcePath);
-      }
-      // If it would land at the vault root (no attachment folder configured), keep
-      // it beside the board instead of cluttering the root.
-      if (!targetPath.includes("/")) {
-        const boardFolder = sourcePath.includes("/") ? sourcePath.split("/").slice(0, -1).join("/") : "";
-        if (boardFolder) targetPath = this.uniqueVaultPath(`${boardFolder}/${targetPath}`);
+      // Card media lives in <board>/attachments so the board folder stays tidy.
+      const board = this.plugin.findBoardForCard(this.card);
+      let targetPath;
+      if (board && board.folderPath) {
+        targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${fileName}`);
+      } else {
+        const fm = this.app.fileManager;
+        targetPath = fm && typeof fm.getAvailablePathForAttachment === "function"
+          ? await fm.getAvailablePathForAttachment(fileName, sourcePath)
+          : fileName;
       }
       const parent = targetPath.split("/").slice(0, -1).join("/");
       if (parent && !this.app.vault.getAbstractFileByPath(parent)) {
@@ -3520,11 +3521,19 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         : (this.data.boards[0] && this.data.boards[0].id) || "";
       const renamed = await this.normalizeCardFilePaths();
       await this.syncCardsFromFolder();
+      // One-time media tidy-up: move loose images/videos into <board>/attachments
+      // and fix their card links. Runs after the folder sync (so details are
+      // current) and before writeAllCardFiles (so the fixes get persisted).
+      const migratedLayout = !this.data.layoutMigrated;
+      if (migratedLayout) {
+        await this.migrateExistingMedia();
+        this.data.layoutMigrated = true;
+      }
       await this.writeAllCardFiles();
       await this.writeBoardIndexFiles();
       await this.syncGraphColorGroups();
       this.updateExplorerColors();
-      if (restored || renamed || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
+      if (restored || renamed || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
     } finally {
       this.reconciling = false;
     }
@@ -4732,6 +4741,116 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     await this.app.vault.rename(file, nextPath);
     card.filePath = nextPath;
     return true;
+  }
+
+  /**
+   * One-time: moves loose board media (images/videos pasted before the
+   * cards/attachments layout) into <board>/attachments and repoints the card
+   * links that used a full path. Card notes are relocated separately by
+   * normalizeCardFilePaths. Must run AFTER syncCardsFromFolder and BEFORE
+   * writeAllCardFiles so the rewritten details are the ones persisted.
+   */
+  async migrateExistingMedia() {
+    let moved = false;
+    for (const board of this.data.boards) {
+      if (await this.migrateBoardMedia(board)) moved = true;
+    }
+    return moved;
+  }
+
+  async migrateBoardMedia(board) {
+    if (!board || !board.folderPath) return false;
+    const root = this.app.vault.getAbstractFileByPath(board.folderPath);
+    if (!root || !root.children) return false;
+    const attachDir = `${board.folderPath}/attachments`;
+
+    // Loose (non-Markdown) files sitting directly in the board root — don't
+    // descend into subfolders (cards, attachments, nested boards, or media the
+    // user organised themselves).
+    const looseRoot = new Set(
+      (root.children || [])
+        .filter((child) => !child.children && child.extension && child.extension.toLowerCase() !== "md")
+        .map((child) => child.path)
+    );
+    if (!looseRoot.size) return false;
+
+    // Build the plan from EVERY embed (image or not) that still resolves to a
+    // loose root file, resolving BEFORE moving so basename lookups can't drift.
+    // We move ONLY files a card actually references here — so every moved file's
+    // link can be fixed, and a file whose card already points into attachments/
+    // (e.g. a peer already migrated it) is never re-moved.
+    const embedRe = /!\[\[([^\]]+)\]\]|!\[[^\]]*\]\(([^)]+)\)/g;
+    const plan = [];
+    const toMove = new Set();
+    for (const card of Object.values(this.data.cards)) {
+      if (!card || !card.details) continue;
+      let match;
+      embedRe.lastIndex = 0;
+      while ((match = embedRe.exec(card.details))) {
+        const isWiki = match[1] !== undefined;
+        let target = (isWiki ? match[1] : match[2]) || "";
+        target = target.split("|")[0].split("#")[0].trim();
+        if (!isWiki) target = target.split(/\s+/)[0];
+        const file = this.resolveEmbedFile(card, target);
+        if (file && looseRoot.has(file.path)) {
+          plan.push({ card, markup: match[0], oldPath: file.path });
+          toMove.add(file.path);
+        }
+      }
+    }
+    if (!toMove.size) return false;
+
+    if (!this.app.vault.getAbstractFileByPath(attachDir)) {
+      await this.app.vault.createFolder(attachDir).catch(() => {});
+    }
+
+    // Move each referenced file into attachments/, recording old -> new. If a
+    // file of that name is already there (e.g. a synced peer already migrated
+    // it), leave the loose file alone rather than creating a deduped duplicate —
+    // its link stays valid and sync converges on its own.
+    const newPathByOld = {};
+    let moved = false;
+    for (const oldPath of toMove) {
+      const file = this.app.vault.getAbstractFileByPath(oldPath);
+      if (!file) continue;
+      const dest = `${attachDir}/${file.name}`;
+      if (dest === oldPath || this.app.vault.getAbstractFileByPath(dest)) continue;
+      try {
+        await this.app.vault.rename(file, dest);
+        newPathByOld[oldPath] = dest;
+        moved = true;
+      } catch (error) {
+        console.error("Task Deck: could not move media", oldPath, error);
+      }
+    }
+
+    // Repoint every referencing embed to its file's new path, by exact markup.
+    plan.forEach(({ card, markup, oldPath }) => {
+      const dest = newPathByOld[oldPath];
+      if (!dest || dest === oldPath) return;
+      card.details = card.details.split(markup).join(`![[${dest}]]`);
+    });
+
+    return moved;
+  }
+
+  // Resolve an embed target (any file type) to a vault TFile, tolerating
+  // URL-encoded Markdown-link paths. Returns null for URLs / unresolved links.
+  resolveEmbedFile(card, target) {
+    if (!target || /^https?:\/\//i.test(target)) return null;
+    const sourcePath = (card && card.filePath) || "";
+    const lookup = (value) => {
+      let file = this.app.vault.getAbstractFileByPath(value);
+      if (!file && this.app.metadataCache && this.app.metadataCache.getFirstLinkpathDest) {
+        try { file = this.app.metadataCache.getFirstLinkpathDest(value, sourcePath); } catch (error) { file = null; }
+      }
+      return file && file.path ? file : null;
+    };
+    let file = lookup(target);
+    if (!file) {
+      try { file = lookup(decodeURIComponent(target)); } catch (error) { file = null; }
+    }
+    return file;
   }
 
   async renameCardFile(card, title) {

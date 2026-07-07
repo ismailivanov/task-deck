@@ -1478,16 +1478,16 @@ class CardModal extends Modal {
         && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
       const fileName = safeImageFileName(realName ? rawName : `Pasted image ${imageStamp()}.${ext}`, ext);
       const sourcePath = (this.card && this.card.filePath) || "";
-      let targetPath = fileName;
-      const fm = this.app.fileManager;
-      if (fm && typeof fm.getAvailablePathForAttachment === "function") {
-        targetPath = await fm.getAvailablePathForAttachment(fileName, sourcePath);
-      }
-      // If it would land at the vault root (no attachment folder configured), keep
-      // it beside the board instead of cluttering the root.
-      if (!targetPath.includes("/")) {
-        const boardFolder = sourcePath.includes("/") ? sourcePath.split("/").slice(0, -1).join("/") : "";
-        if (boardFolder) targetPath = this.uniqueVaultPath(`${boardFolder}/${targetPath}`);
+      // Card media lives in <board>/attachments so the board folder stays tidy.
+      const board = this.plugin.findBoardForCard(this.card);
+      let targetPath;
+      if (board && board.folderPath) {
+        targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${fileName}`);
+      } else {
+        const fm = this.app.fileManager;
+        targetPath = fm && typeof fm.getAvailablePathForAttachment === "function"
+          ? await fm.getAvailablePathForAttachment(fileName, sourcePath)
+          : fileName;
       }
       const parent = targetPath.split("/").slice(0, -1).join("/");
       if (parent && !this.app.vault.getAbstractFileByPath(parent)) {
