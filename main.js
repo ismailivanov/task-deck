@@ -405,14 +405,26 @@ function parseChecklist(text) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^(?:-\s*)?\[([ xX])\]\s*(.*)$/);
+      // Pull off the trailing "<!--@email|name|color-->" member assignment, if any.
+      let assignee = null;
+      let core = line;
+      const am = line.match(/\s*<!--@(.*?)-->\s*$/);
+      if (am) {
+        core = line.slice(0, am.index).trim();
+        const parts = String(am[1] || "").split("|");
+        const email = (parts[0] || "").trim();
+        if (email) assignee = { email, name: (parts[1] || "").trim(), color: (parts[2] || "").trim() };
+      }
+
+      const match = core.match(/^(?:-\s*)?\[([ xX])\]\s*(.*)$/);
       if (!match) {
-        return { done: false, text: line.replace(/^- /, "").trim() };
+        return { done: false, text: core.replace(/^- /, "").trim(), assignee };
       }
 
       return {
         done: match[1].toLowerCase() === "x",
         text: match[2].trim(),
+        assignee,
       };
     })
     .filter((item) => item.text);
@@ -426,7 +438,17 @@ function checklistToText(items) {
 
 function checklistToMarkdown(items) {
   return (items || [])
-    .map((item) => `- [${item.done ? "x" : " "}] ${textLine(item.text)}`)
+    .map((item) => {
+      const base = `- [${item.done ? "x" : " "}] ${textLine(item.text)}`;
+      const a = item.assignee;
+      if (a && a.email) {
+        // Per-item member assignment, hidden in an HTML comment so it round-trips
+        // and stays invisible in Markdown preview.
+        const safe = (v) => String(v || "").replace(/[|>]/g, " ").trim();
+        return `${base} <!--@${safe(a.email)}|${safe(a.name)}|${safe(a.color)}-->`;
+      }
+      return base;
+    })
     .join("\n");
 }
 
@@ -1507,6 +1529,36 @@ class CardModal extends Modal {
     menu.showAtMouseEvent(event);
   }
 
+  // Single-member picker for one checklist item (leftmost circle).
+  showChecklistMemberMenu(event, item, rerender) {
+    const members = this.plugin.getVaultMembers();
+    const menu = new Menu();
+    menu.addItem((mi) => mi
+      .setTitle("Unassigned")
+      .setChecked(!(item.assignee && item.assignee.email))
+      .onClick(() => {
+        item.assignee = null;
+        rerender();
+        this.saveNow().catch(console.error);
+      }));
+    if (!members.length) {
+      menu.addItem((mi) => mi.setTitle("No members — sign in to Sync Deck").setDisabled(true));
+    } else {
+      members.forEach((member) => {
+        const current = !!(item.assignee && item.assignee.email === member.email);
+        menu.addItem((mi) => mi
+          .setTitle(member.name || member.email)
+          .setChecked(current)
+          .onClick(() => {
+            item.assignee = { email: member.email, name: member.name, color: member.color };
+            rerender();
+            this.saveNow().catch(console.error);
+          }));
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+
   render() {
     const card = this.card;
     this.contentEl.replaceChildren();
@@ -2253,7 +2305,43 @@ class CardModal extends Modal {
           item.text = input.value;
           this.queueSave();
         });
-        row.append(checkbox, input, remove);
+
+        // Per-item member circle (leftmost): click to assign this item to a member.
+        const assigneeBtn = createElement("button", "ot-checklist-assignee");
+        assigneeBtn.type = "button";
+        const paintAssignee = () => {
+          assigneeBtn.replaceChildren();
+          const a = item.assignee;
+          if (a && a.email) {
+            assigneeBtn.classList.add("is-assigned");
+            assigneeBtn.title = a.name || a.email;
+            const avatar = createElement("span", "ot-card-avatar");
+            avatar.style.setProperty("--ot-avatar-color", a.color || "#8b5cf6");
+            const picture = this.plugin.getMemberPicture(a.email);
+            if (picture) {
+              const img = createElement("img", "");
+              img.src = picture;
+              img.alt = "";
+              avatar.append(img);
+            } else {
+              avatar.textContent = initials(a.name || a.email);
+              avatar.classList.add("is-initials");
+            }
+            assigneeBtn.append(avatar);
+          } else {
+            assigneeBtn.classList.remove("is-assigned");
+            assigneeBtn.title = "Assign member";
+            assigneeBtn.append(createElement("span", "ot-checklist-assignee-empty"));
+          }
+        };
+        paintAssignee();
+        assigneeBtn.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.showChecklistMemberMenu(event, item, paintAssignee);
+        });
+
+        row.append(assigneeBtn, checkbox, input, remove);
         list.append(row);
       });
       updateProgress();
@@ -2322,7 +2410,13 @@ class CardModal extends Modal {
       assignees: clone(this.localAssignees || []),
       details: this.localDetails.trim(),
       checklist: this.localChecklist
-        .map((item) => ({ done: !!item.done, text: textLine(item.text) }))
+        .map((item) => ({
+          done: !!item.done,
+          text: textLine(item.text),
+          assignee: item.assignee && item.assignee.email
+            ? { email: item.assignee.email, name: item.assignee.name || "", color: item.assignee.color || "" }
+            : null,
+        }))
         .filter((item) => item.text),
     };
   }

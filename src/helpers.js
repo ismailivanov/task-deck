@@ -402,14 +402,26 @@ function parseChecklist(text) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^(?:-\s*)?\[([ xX])\]\s*(.*)$/);
+      // Pull off the trailing "<!--@email|name|color-->" member assignment, if any.
+      let assignee = null;
+      let core = line;
+      const am = line.match(/\s*<!--@(.*?)-->\s*$/);
+      if (am) {
+        core = line.slice(0, am.index).trim();
+        const parts = String(am[1] || "").split("|");
+        const email = (parts[0] || "").trim();
+        if (email) assignee = { email, name: (parts[1] || "").trim(), color: (parts[2] || "").trim() };
+      }
+
+      const match = core.match(/^(?:-\s*)?\[([ xX])\]\s*(.*)$/);
       if (!match) {
-        return { done: false, text: line.replace(/^- /, "").trim() };
+        return { done: false, text: core.replace(/^- /, "").trim(), assignee };
       }
 
       return {
         done: match[1].toLowerCase() === "x",
         text: match[2].trim(),
+        assignee,
       };
     })
     .filter((item) => item.text);
@@ -423,7 +435,17 @@ function checklistToText(items) {
 
 function checklistToMarkdown(items) {
   return (items || [])
-    .map((item) => `- [${item.done ? "x" : " "}] ${textLine(item.text)}`)
+    .map((item) => {
+      const base = `- [${item.done ? "x" : " "}] ${textLine(item.text)}`;
+      const a = item.assignee;
+      if (a && a.email) {
+        // Per-item member assignment, hidden in an HTML comment so it round-trips
+        // and stays invisible in Markdown preview.
+        const safe = (v) => String(v || "").replace(/[|>]/g, " ").trim();
+        return `${base} <!--@${safe(a.email)}|${safe(a.name)}|${safe(a.color)}-->`;
+      }
+      return base;
+    })
     .join("\n");
 }
 

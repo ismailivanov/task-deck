@@ -1587,13 +1587,43 @@
 
 .ot-checklist-row {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 30px;
+  grid-template-columns: 26px 20px minmax(0, 1fr) 30px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-height: 32px;
   border-radius: 6px;
   padding: 2px 4px;
   background: transparent;
+}
+
+/* Per-item member assignment circle (leftmost). */
+.ot-checklist-assignee {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ot-checklist-assignee .ot-card-avatar {
+  width: 24px;
+  height: 24px;
+}
+
+.ot-checklist-assignee-empty {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1.5px dashed var(--background-modifier-border);
+}
+
+.ot-checklist-assignee:hover .ot-checklist-assignee-empty {
+  border-color: var(--interactive-accent);
 }
 
 .ot-checklist-row input[type="checkbox"] {
