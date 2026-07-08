@@ -3255,6 +3255,27 @@ class TaskDeckSettingTab extends PluginSettingTab {
             this.display();
           });
       });
+
+    // Pull-now + last-sync status. `runNextcloudSync` never rejects; it
+    // reports through the sync manager's status object.
+    const statusEl = containerEl.createEl("div", { cls: "ot-settings-inline-status" });
+    statusEl.setText(this.formatSyncStatus(nextcloud));
+
+    new Setting(containerEl)
+      .setName("Pull from Nextcloud")
+      .setDesc("Fetch remote boards, stacks, and cards. Read-only for now — pushes arrive in M3.")
+      .addButton((button) => {
+        button
+          .setButtonText("Pull now")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            statusEl.setText("Pulling from Nextcloud…");
+            const result = await this.plugin.runNextcloudSync({ manual: true });
+            statusEl.setText(this.formatSyncStatus(this.plugin.data.nextcloud, result));
+            button.setDisabled(false);
+          });
+      });
   }
 
   renderSignedOutState(containerEl, nextcloud) {
@@ -3356,6 +3377,7 @@ class TaskDeckSettingTab extends PluginSettingTab {
             syncIntervalMs: Number(value),
           });
           await this.plugin.saveData(this.plugin.data);
+          this.plugin.scheduleNextcloudSync();
         });
       });
 
@@ -3372,6 +3394,15 @@ class TaskDeckSettingTab extends PluginSettingTab {
           await this.plugin.saveData(this.plugin.data);
         });
       });
+  }
+
+  formatSyncStatus(nextcloud, override) {
+    const status = override || (this.plugin.syncManager && this.plugin.syncManager.getStatus()) || null;
+    if (status && status.state === "running") return status.message || "Pulling…";
+    if (status && status.state === "error") return `Pull failed: ${status.message}`;
+    const last = Number((nextcloud && nextcloud.lastSyncAt) || (status && status.at) || 0);
+    if (!last) return "No sync yet.";
+    return `Last sync: ${new Date(last).toLocaleString()}`;
   }
 
   // Login flow orchestration ------------------------------------------------
@@ -3795,6 +3826,401 @@ module.exports = {
 };
 
   },
+  "src/sync-mapper.js": function(module, exports, __require) {
+const { uid, cleanColor, cleanDate } = __require("src/helpers.js");
+
+// Nextcloud Deck ↔ local board model translators.
+//
+// Everything here is a pure function so it can be exercised by node's own
+// assert module without spinning up Obsidian. The sync manager is the only
+// caller; the plugin talks to that instead of poking these helpers directly.
+
+/** Convert Deck's #rrggbb-ish "0082c9" into our "#0082c9" convention. */
+function decodeDeckColor(raw) {
+  if (!raw) return "";
+  const trimmed = String(raw).trim();
+  if (!trimmed) return "";
+  const withHash = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+  return cleanColor(withHash) || "";
+}
+
+/** Convert Deck's ISO 8601 duedate string into our YYYY-MM-DD storage form. */
+function decodeDeckDate(raw) {
+  if (!raw) return null;
+  // Deck emits "2026-07-15T00:00:00+00:00"; cleanDate already tolerates that.
+  return cleanDate(String(raw).slice(0, 10));
+}
+
+/**
+ * Convert a remote card payload into the local card shape. Assignees are
+ * preserved as-is (uid + display name) so future team support can round-trip
+ * cleanly, but the MVP UI won't render them.
+ */
+function remoteCardToLocal(remoteCard, { boardId, listId }) {
+  if (!remoteCard) return null;
+  const labels = Array.isArray(remoteCard.labels)
+    ? remoteCard.labels.map((label) => ({
+        name: String(label.title || "").trim(),
+        color: decodeDeckColor(label.color) || "#d43c35",
+      })).filter((label) => label.name)
+    : [];
+
+  const assignees = Array.isArray(remoteCard.assignedUsers)
+    ? remoteCard.assignedUsers
+        .map((entry) => {
+          const p = entry && entry.participant ? entry.participant : entry;
+          if (!p) return null;
+          return {
+            email: p.email || p.primaryKey || p.uid || "",
+            name: p.displayname || p.uid || "",
+            color: "#8b5cf6",
+          };
+        })
+        .filter((a) => a && a.email)
+    : [];
+
+  return {
+    id: uid("card"),
+    remoteId: remoteCard.id ?? null,
+    etag: remoteCard.ETag || null,
+    remoteUpdatedAt: remoteCard.lastModified || 0,
+    baselineHash: null, // populated by sync-manager once the description hash is computed
+    localDirty: false,
+    boardId,
+    listId,
+    title: String(remoteCard.title || "").trim() || "Untitled card",
+    details: typeof remoteCard.description === "string" ? remoteCard.description : "",
+    labels,
+    assignees,
+    checklist: [], // Deck has no first-class checklist; extraction from description is deferred
+    completed: !!remoteCard.done, // Deck cards may carry `done` when archived; treat as complete for UX parity
+    startDate: null,
+    dueDate: decodeDeckDate(remoteCard.duedate),
+    filePath: "", // assigned when the note is written to the vault
+    position: typeof remoteCard.order === "number" ? remoteCard.order : null,
+  };
+}
+
+/**
+ * Merge a freshly pulled remote card onto an existing local card. Fields the
+ * user hasn't touched locally (`localDirty === false`) are overwritten; the
+ * local id and file path are preserved so vault notes don't churn.
+ */
+function mergeRemoteCardOntoLocal(existing, remoteCard, { boardId, listId }) {
+  const remote = remoteCardToLocal(remoteCard, { boardId, listId });
+  if (!existing) return remote;
+
+  const merged = { ...existing };
+  merged.remoteId = remote.remoteId;
+  merged.etag = remote.etag;
+  merged.remoteUpdatedAt = remote.remoteUpdatedAt;
+  merged.listId = remote.listId;
+  merged.boardId = remote.boardId;
+  merged.position = remote.position;
+
+  // Only overwrite user-editable fields when the local copy has no unsynced
+  // changes. This is intentionally coarse for M2 (read-only pull); M3 will
+  // upgrade to field-level three-way merge with baselineHash.
+  if (!existing.localDirty) {
+    merged.title = remote.title;
+    merged.details = remote.details;
+    merged.labels = remote.labels;
+    merged.assignees = remote.assignees;
+    merged.completed = remote.completed;
+    merged.dueDate = remote.dueDate;
+    merged.startDate = remote.startDate;
+  }
+  return merged;
+}
+
+/**
+ * Build a fresh local board shape from a remote board + its stacks. Cards live
+ * separately in the plugin's `data.cards` map, so this helper only returns the
+ * board skeleton; the sync manager stitches cards in afterwards.
+ */
+function remoteBoardToLocal(remoteBoard, remoteStacks, { boardId, folderPath }) {
+  const color = decodeDeckColor(remoteBoard.color);
+  const lists = (remoteStacks || [])
+    .slice()
+    .sort((a, b) => (a.order || 0) - (b.order || 0))
+    .map((stack) => ({
+      id: uid("list"),
+      remoteId: stack.id,
+      title: String(stack.title || "").trim() || "List",
+      color: color || "",
+      cardIds: [],
+    }));
+
+  return {
+    id: boardId || uid("board"),
+    remoteId: remoteBoard.id,
+    etag: remoteBoard.ETag || null,
+    name: String(remoteBoard.title || "").trim() || "Board",
+    folderPath: folderPath || "",
+    lists,
+    deletedListIds: [],
+  };
+}
+
+/**
+ * Given an existing local board and a fresh remote board + stacks, return an
+ * updated board (immutable style). Stacks are keyed by `remoteId` so a rename
+ * on Nextcloud doesn't rip the list apart.
+ */
+function reconcileBoardStructure(existingBoard, remoteBoard, remoteStacks) {
+  const color = decodeDeckColor(remoteBoard.color);
+  const known = new Map();
+  (existingBoard.lists || []).forEach((list) => {
+    if (list && list.remoteId != null) known.set(list.remoteId, list);
+  });
+
+  const nextLists = (remoteStacks || [])
+    .slice()
+    .sort((a, b) => (a.order || 0) - (b.order || 0))
+    .map((stack) => {
+      const prior = known.get(stack.id);
+      if (prior) {
+        return {
+          ...prior,
+          title: String(stack.title || "").trim() || prior.title,
+          color: prior.color || color || "",
+        };
+      }
+      return {
+        id: uid("list"),
+        remoteId: stack.id,
+        title: String(stack.title || "").trim() || "List",
+        color: color || "",
+        cardIds: [],
+      };
+    });
+
+  return {
+    ...existingBoard,
+    remoteId: remoteBoard.id,
+    etag: remoteBoard.ETag || existingBoard.etag || null,
+    name: String(remoteBoard.title || "").trim() || existingBoard.name,
+    lists: nextLists,
+  };
+}
+
+/** Utility used by tests: card is considered "remotely tracked" iff it has a numeric remoteId. */
+function isRemoteTracked(card) {
+  return !!(card && card.remoteId != null);
+}
+
+module.exports = {
+  decodeDeckColor,
+  decodeDeckDate,
+  remoteCardToLocal,
+  mergeRemoteCardOntoLocal,
+  remoteBoardToLocal,
+  reconcileBoardStructure,
+  isRemoteTracked,
+};
+  },
+  "src/sync-manager.js": function(module, exports, __require) {
+const {
+  remoteBoardToLocal,
+  reconcileBoardStructure,
+  mergeRemoteCardOntoLocal,
+} = __require("src/sync-mapper.js");
+const { DeckApiError } = __require("src/deck-client.js");
+
+// Coordinates read-only pulls from Nextcloud Deck. Writes (M3) will land here
+// as well so the plugin only needs one entry point (`runSync`) regardless of
+// direction.
+//
+// The manager is stateful only in memory: `this.status` tracks the last run,
+// while persistent bindings (localBoardId ↔ remoteBoardId) live in
+// `plugin.data.nextcloud.boardBindings` so a restart still knows which local
+// board mirrors which remote one.
+
+const STATUS_IDLE = "idle";
+const STATUS_RUNNING = "running";
+const STATUS_ERROR = "error";
+const STATUS_OK = "ok";
+
+class SyncManager {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.status = { state: STATUS_IDLE, at: 0, message: "" };
+    this.running = null; // in-flight promise so concurrent calls coalesce
+  }
+
+  getStatus() { return this.status; }
+
+  /**
+   * Kick off (or join) a pull. Always resolves — errors are surfaced through
+   * `this.status.state === "error"` so callers can render a badge instead of
+   * having to catch.
+   */
+  async runPull({ manual = false } = {}) {
+    if (this.running) return this.running;
+    this.running = this.pullOnce({ manual }).finally(() => { this.running = null; });
+    return this.running;
+  }
+
+  async pullOnce({ manual }) {
+    const client = await this.plugin.getDeckClient();
+    if (!client) {
+      this.status = { state: STATUS_ERROR, at: Date.now(), message: "Nextcloud is not connected." };
+      return this.status;
+    }
+    this.status = { state: STATUS_RUNNING, at: Date.now(), message: manual ? "Manual pull…" : "Pulling from Nextcloud…" };
+
+    try {
+      const { data: remoteBoards } = await client.getBoards();
+      if (!Array.isArray(remoteBoards)) throw new Error("Unexpected boards response.");
+
+      const bindings = this.getBindings();
+      const boardMap = new Map(this.plugin.data.boards.map((board) => [board.id, board]));
+      const boundLocalIds = new Set();
+
+      for (const remoteBoard of remoteBoards) {
+        const localBoardId = this.findOrBindLocalBoard(remoteBoard, bindings, boardMap);
+        boundLocalIds.add(localBoardId);
+        await this.pullBoard(client, remoteBoard, localBoardId);
+      }
+
+      this.plugin.data.nextcloud.boardBindings = bindings;
+      this.plugin.data.nextcloud.lastSyncAt = Date.now();
+      await this.plugin.savePluginData();
+      this.plugin.refreshViews();
+      this.status = {
+        state: STATUS_OK,
+        at: Date.now(),
+        message: `Pulled ${remoteBoards.length} board${remoteBoards.length === 1 ? "" : "s"}.`,
+      };
+    } catch (error) {
+      const message = error instanceof DeckApiError
+        ? `Deck API ${error.status || "error"}: ${error.message}`
+        : (error && error.message) || String(error);
+      this.status = { state: STATUS_ERROR, at: Date.now(), message };
+      this.plugin.pushSyncLog({ event: "pull-failed", message });
+    }
+    return this.status;
+  }
+
+  // ---- Board-level pull ---------------------------------------------------
+
+  async pullBoard(client, remoteBoard, localBoardId) {
+    const localBoard = this.plugin.data.boards.find((board) => board.id === localBoardId);
+    if (!localBoard) {
+      // Freshly minted binding — build the board from scratch.
+      const { data: stacks } = await client.getStacks(remoteBoard.id);
+      const created = remoteBoardToLocal(remoteBoard, stacks || [], { boardId: localBoardId, folderPath: this.suggestFolder(remoteBoard) });
+      this.plugin.data.boards.push(created);
+      await this.pullCards(client, remoteBoard.id, created, stacks || []);
+      return;
+    }
+
+    // Existing board: only refresh stack structure + cards.
+    const { data: stacks } = await client.getStacks(remoteBoard.id);
+    const reconciled = reconcileBoardStructure(localBoard, remoteBoard, stacks || []);
+    // Splice-replace to preserve reference identity of the boards array
+    const index = this.plugin.data.boards.indexOf(localBoard);
+    this.plugin.data.boards[index] = reconciled;
+    await this.pullCards(client, remoteBoard.id, reconciled, stacks || []);
+  }
+
+  async pullCards(client, remoteBoardId, localBoard, remoteStacks) {
+    // Deck's `getStacks` already returns cards as an embedded array on each
+    // stack; we prefer that over N follow-up requests. Fall back to a per-card
+    // GET only when the embedded array is missing (older Deck versions).
+    const cardMap = new Map(); // remoteCardId -> existing local card
+    Object.values(this.plugin.data.cards).forEach((card) => {
+      if (card.boardId === localBoard.id && card.remoteId != null) cardMap.set(card.remoteId, card);
+    });
+
+    // Reset card lists — we rebuild them from the remote order.
+    localBoard.lists.forEach((list) => { list.cardIds = []; });
+
+    for (const stack of remoteStacks) {
+      const localList = localBoard.lists.find((list) => list.remoteId === stack.id);
+      if (!localList) continue;
+
+      const cards = Array.isArray(stack.cards) && stack.cards.length
+        ? stack.cards
+        : await this.fallbackFetchStackCards(client, remoteBoardId, stack.id);
+
+      const sorted = cards.slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+      for (const remoteCard of sorted) {
+        const existing = cardMap.get(remoteCard.id);
+        const merged = mergeRemoteCardOntoLocal(existing, remoteCard, { boardId: localBoard.id, listId: localList.id });
+        const cardId = existing ? existing.id : merged.id;
+        merged.id = cardId;
+        merged.boardId = localBoard.id;
+        merged.listId = localList.id;
+        this.plugin.data.cards[cardId] = merged;
+        localList.cardIds.push(cardId);
+        cardMap.delete(remoteCard.id);
+      }
+    }
+
+    // Cards left in `cardMap` were on Nextcloud last time but not now. For M2
+    // (read-only) we remove them locally — this matches the "Nextcloud is the
+    // source of truth for tracked cards" model. Cards without a remoteId are
+    // untouched.
+    cardMap.forEach((orphan) => {
+      if (orphan.boardId === localBoard.id) {
+        delete this.plugin.data.cards[orphan.id];
+      }
+    });
+  }
+
+  async fallbackFetchStackCards(client, boardId, stackId) {
+    // Not all Deck versions embed cards; if we ever hit that, iterate what the
+    // stack payload gave us (may still be empty), and let the sync log surface
+    // the shortfall. A real per-card fetch would need a card index which the
+    // Deck API doesn't expose without an extra call chain; keep it minimal.
+    this.plugin.pushSyncLog({ event: "stack-embed-missing", boardId, stackId });
+    return [];
+  }
+
+  // ---- Bindings -----------------------------------------------------------
+
+  getBindings() {
+    const bindings = this.plugin.data.nextcloud.boardBindings || {};
+    return typeof bindings === "object" ? { ...bindings } : {};
+  }
+
+  findOrBindLocalBoard(remoteBoard, bindings, boardMap) {
+    for (const [localId, remoteId] of Object.entries(bindings)) {
+      if (Number(remoteId) === Number(remoteBoard.id) && boardMap.get(localId)) return localId;
+    }
+    // Try to reuse an existing local board with the same name (helpful when
+    // the user set both sides up manually before signing in).
+    const nameMatch = this.plugin.data.boards.find(
+      (board) => !bindings[board.id] && board.name && board.name.trim() === String(remoteBoard.title || "").trim(),
+    );
+    if (nameMatch) {
+      bindings[nameMatch.id] = remoteBoard.id;
+      return nameMatch.id;
+    }
+    // Otherwise reserve a fresh local id — the board itself is materialised
+    // by `pullBoard` below.
+    const created = `board-${remoteBoard.id}`;
+    bindings[created] = remoteBoard.id;
+    return created;
+  }
+
+  suggestFolder(remoteBoard) {
+    // Simple, deterministic folder placement: Nextcloud Deck/<title>. The user
+    // can rename the folder afterwards; the binding table keeps the mapping.
+    const title = String(remoteBoard.title || "Board").replace(/[\\/:*?"<>|]/g, " ").trim() || "Board";
+    return `Nextcloud Deck/${title}`;
+  }
+}
+
+module.exports = {
+  SyncManager,
+  STATUS_IDLE,
+  STATUS_RUNNING,
+  STATUS_ERROR,
+  STATUS_OK,
+};
+  },
   "src/plugin.js": function(module, exports, __require) {
 const { Notice, Plugin, addIcon } = require("obsidian");
 
@@ -3837,6 +4263,7 @@ const {
   revokeAppPassword,
 } = __require("src/nextcloud-auth.js");
 const { DeckClient } = __require("src/deck-client.js");
+const { SyncManager } = __require("src/sync-manager.js");
 
 /**
  * Main plugin controller.
@@ -3866,6 +4293,13 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         console.error("Task Deck: startup vault reconcile failed", error);
         new Notice("Task Deck loaded, but reconciling notes hit an error. Your boards are intact.");
       });
+      // Kick off Nextcloud pulls only after the vault has settled so any
+      // startup file work runs first (and any 30s local safety net doesn't
+      // fight a remote pull for the same data.json write lock).
+      this.scheduleNextcloudSync();
+      if (this.isNextcloudEnabled()) {
+        this.runNextcloudSync().catch(() => {});
+      }
     });
 
     // Boards sync themselves: vault events reconcile on change, and this periodic
@@ -4042,6 +4476,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.nextcloudAppPassword = appPassword;
     this.deckClient = null;
     await this.saveData(this.data);
+    this.scheduleNextcloudSync();
   }
 
   /**
@@ -4064,6 +4499,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     });
     this.nextcloudAppPassword = "";
     this.deckClient = null;
+    if (this.nextcloudPullTimer) { window.clearInterval(this.nextcloudPullTimer); this.nextcloudPullTimer = null; }
     await this.saveData(this.data);
   }
 
@@ -4098,6 +4534,34 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.syncLog.push(Object.assign({ at: Date.now() }, event));
     // Cap the buffer so a chatty sync never balloons memory.
     if (this.syncLog.length > 200) this.syncLog.splice(0, this.syncLog.length - 200);
+  }
+
+  /**
+   * Lazy SyncManager. Created on first access so plain local use never spins
+   * up the machinery. Reset by signOutNextcloud() alongside `deckClient`.
+   */
+  getSyncManager() {
+    if (!this.syncManager) this.syncManager = new SyncManager(this);
+    return this.syncManager;
+  }
+
+  /** Run a pull from Nextcloud Deck. Safe to call when disconnected — the
+   *  manager will surface a status message instead of throwing. */
+  async runNextcloudSync({ manual = false } = {}) {
+    if (!this.isNextcloudEnabled()) return { state: "idle", at: Date.now(), message: "Not connected." };
+    const manager = this.getSyncManager();
+    return manager.runPull({ manual });
+  }
+
+  scheduleNextcloudSync() {
+    if (this.nextcloudPullTimer) window.clearInterval(this.nextcloudPullTimer);
+    const interval = Number((this.data.nextcloud || {}).syncIntervalMs || 0);
+    if (!interval) return; // manual only
+    this.nextcloudPullTimer = window.setInterval(() => {
+      if (!this.isNextcloudEnabled()) return;
+      this.runNextcloudSync().catch((error) => console.error("Nextcloud pull failed", error));
+    }, interval);
+    this.registerInterval(this.nextcloudPullTimer);
   }
 
   getBoard() {
