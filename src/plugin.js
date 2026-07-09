@@ -97,6 +97,13 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     }, 30000));
 
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
+
+    // Second ribbon: quick-access "Sync with Nextcloud" button. Exposing this
+    // outside of the settings tab shortens the loop for the most common
+    // interactive action. Only shown when Nextcloud is configured — otherwise
+    // it would silently do nothing.
+    this.nextcloudRibbonIcon = null;
+    this.updateNextcloudRibbon();
     this.addCommand({
       id: "open-board",
       name: "Open board",
@@ -138,11 +145,66 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         new SyncLogModal(this.app, this).open();
       },
     });
+
+    // Kick off the auto-sync scheduler last, once the rest of onload has
+    // wired up the sync manager and data. Safe no-op when disabled.
+    this.reconfigureAutoSync();
   }
 
   async onunload() {
     if (this.explorerColorStyleEl) this.explorerColorStyleEl.remove();
+    if (this.autoSyncTimer) {
+      window.clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  /**
+   * Show/hide the "Sync with Nextcloud" ribbon icon based on whether the
+   * plugin is actually connected. Called after settings changes so the
+   * icon appears immediately when the user signs in and disappears when
+   * they sign out.
+   */
+  updateNextcloudRibbon() {
+    const shouldShow = this.isNextcloudEnabled();
+    if (shouldShow && !this.nextcloudRibbonIcon) {
+      this.nextcloudRibbonIcon = this.addRibbonIcon("refresh-cw", "Sync with Nextcloud Deck", async () => {
+        const status = await this.runNextcloudSync({ manual: true });
+        if (status && status.state === "error") new Notice(`Sync failed: ${status.message}`);
+        else if (status && status.message) new Notice(status.message);
+      });
+    } else if (!shouldShow && this.nextcloudRibbonIcon) {
+      this.nextcloudRibbonIcon.remove();
+      this.nextcloudRibbonIcon = null;
+    }
+  }
+
+  /**
+   * (Re)start the periodic auto-sync timer. Called from onload, settings
+   * save, and after successful sign-in/out so the schedule reflects the
+   * current settings without needing a plugin reload.
+   */
+  reconfigureAutoSync() {
+    if (this.autoSyncTimer) {
+      window.clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
+    const nc = this.data && this.data.nextcloud;
+    if (!nc || !nc.autoSyncEnabled || !this.isNextcloudEnabled()) return;
+    // Clamp to at least a minute — running more often than that has no
+    // practical benefit and would hammer the Nextcloud instance.
+    const minutes = Math.max(1, Number(nc.autoSyncMinutes) || 15);
+    const ms = minutes * 60 * 1000;
+    this.autoSyncTimer = window.setInterval(() => {
+      // Skip if a sync is already in progress or if the window is offline.
+      if (this.nextcloudSyncInFlight) return;
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      this.runNextcloudSync({ manual: false }).catch((error) => {
+        console.error("Auto sync failed", error);
+      });
+    }, ms);
+    this.registerInterval(this.autoSyncTimer);
   }
 
   /**
@@ -284,6 +346,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.deckClient = null;
     await this.saveData(this.data);
     this.scheduleNextcloudSync();
+    // Now that we're connected, expose the ribbon icon and start the
+    // auto-sync timer if the user has it enabled.
+    this.updateNextcloudRibbon();
+    this.reconfigureAutoSync();
   }
 
   /**
@@ -308,6 +374,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.deckClient = null;
     if (this.nextcloudPullTimer) { window.clearInterval(this.nextcloudPullTimer); this.nextcloudPullTimer = null; }
     await this.saveData(this.data);
+    // Reflect the new "disconnected" state in the ribbon and stop the
+    // periodic auto-sync so we don't keep hammering a defunct client.
+    this.updateNextcloudRibbon();
+    this.reconfigureAutoSync();
   }
 
   /**
@@ -464,18 +534,26 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    *  manager will surface a status message instead of throwing. */
   async runNextcloudSync({ manual = false } = {}) {
     if (!this.isNextcloudEnabled()) return { state: "idle", at: Date.now(), message: "Not connected." };
-    // Absorb any orphan Markdown cards the user (or another plugin) dropped
-    // into board folders before we ship state to Nextcloud. This is what the
-    // old "Sync card notes" button used to do; folding it in here means users
-    // only need one button and can't end up out of sync.
+    // Serialize sync runs so an auto-sync tick can't stampede on top of a
+    // still-running manual sync. Returning the in-flight promise means
+    // concurrent callers see the same result instead of a spurious retry.
+    if (this.nextcloudSyncInFlight) return this.nextcloudSyncInFlight;
+    const run = (async () => {
+      try {
+        await this.syncCardsFromFolder();
+      } catch (error) {
+        // Non-fatal: proceed with the network sync even if folder scan blows up.
+        this.pushSyncLog({ event: "folder-scan-failed", message: (error && error.message) || String(error) });
+      }
+      const manager = this.getSyncManager();
+      return manager.runPull({ manual });
+    })();
+    this.nextcloudSyncInFlight = run;
     try {
-      await this.syncCardsFromFolder();
-    } catch (error) {
-      // Non-fatal: proceed with the network sync even if folder scan blows up.
-      this.pushSyncLog({ event: "folder-scan-failed", message: (error && error.message) || String(error) });
+      return await run;
+    } finally {
+      this.nextcloudSyncInFlight = null;
     }
-    const manager = this.getSyncManager();
-    return manager.runPull({ manual });
   }
 
   scheduleNextcloudSync() {

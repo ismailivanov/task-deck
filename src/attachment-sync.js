@@ -145,18 +145,32 @@ class AttachmentSyncer {
     const knownByPath = new Map(card.attachments.filter((e) => e.filePath).map((entry) => [entry.filePath, entry]));
 
     let uploaded = 0;
+    const debug = (payload) => this.plugin.debugLog(Object.assign({ scope: "attachments" }, payload));
+    debug({ event: "push.scan", cardId: card.id, dir, children: dirRef.children.length });
     for (const child of dirRef.children) {
       if (!child || child.children) continue; // skip nested directories
-      if (knownByPath.has(child.path)) continue; // already tracked
+      if (knownByPath.has(child.path)) { debug({ event: "push.skip-tracked", path: child.path }); continue; }
       try {
         const data = await this.plugin.app.vault.readBinary(child);
         const filename = sanitizeFilename(child.name);
+        debug({ event: "push.upload.request", path: child.path, filename, bytes: data.byteLength || 0 });
         const { data: response } = await client.uploadAttachment(board.remoteId, list.remoteId, card.remoteId, {
           data: new Uint8Array(data),
           filename,
           mimeType: guessMime(filename),
         });
-        if (!response || response.id == null) continue;
+        debug({ event: "push.upload.response", path: child.path, responseId: response && response.id, responseKeys: response ? Object.keys(response) : null });
+        if (!response || response.id == null) {
+          // Log this specifically — the older singular-endpoint bug made
+          // the response empty even though the file uploaded, which we
+          // want to be able to identify at a glance in diagnostics.
+          this.plugin.pushSyncLog({
+            event: "attachment-upload-empty-response",
+            cardId: card.id,
+            filename,
+          });
+          continue;
+        }
         card.attachments.push({
           remoteId: response.id,
           filePath: child.path,
@@ -170,6 +184,7 @@ class AttachmentSyncer {
           event: "attachment-upload-failed",
           cardId: card.id,
           filename: child.name,
+          status: error && error.status,
           message: (error && error.message) || String(error),
         });
       }

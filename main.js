@@ -56,6 +56,11 @@ const DEFAULT_NEXTCLOUD = {
   boardBindings: {},
   lastSyncAt: 0,
   syncIntervalMs: 60000,
+  // Auto-sync: when enabled, runNextcloudSync fires every autoSyncMinutes.
+  // Off by default to preserve the manual model people are used to; also
+  // avoids surprising folks with unexpected background traffic.
+  autoSyncEnabled: false,
+  autoSyncMinutes: 15,
   // prompt | local | remote | newer-wins — see docs/plan §5.
   conflictPolicy: "prompt",
   // Attachments are Phase 2 territory; the toggle is here so the data schema
@@ -3456,6 +3461,41 @@ class TaskDeckSettingTab extends PluginSettingTab {
             button.setDisabled(false);
           });
       });
+
+    // Automatic periodic sync. Off by default — some users prefer manual
+    // sync for predictable network use. Minutes-granularity is coarse on
+    // purpose: a more aggressive schedule would hammer the Nextcloud
+    // instance without meaningful benefit for a task board.
+    new Setting(containerEl)
+      .setName("Automatic sync")
+      .setDesc("Run Sync with Nextcloud in the background on a schedule. Sync is also available from a ribbon icon on the left side.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(!!nextcloud.autoSyncEnabled)
+          .onChange(async (value) => {
+            this.plugin.data.nextcloud = Object.assign({}, this.plugin.data.nextcloud, { autoSyncEnabled: value });
+            await this.plugin.saveData(this.plugin.data);
+            this.plugin.reconfigureAutoSync();
+            this.display();
+          });
+      });
+
+    if (nextcloud.autoSyncEnabled) {
+      new Setting(containerEl)
+        .setName("Sync interval (minutes)")
+        .setDesc("Minimum is 1 minute. Reasonable values: 5-30 for laptops, 60+ for background devices.")
+        .addText((text) => {
+          text
+            .setPlaceholder("15")
+            .setValue(String(nextcloud.autoSyncMinutes || 15))
+            .onChange(async (raw) => {
+              const parsed = Math.max(1, Math.floor(Number(raw) || 15));
+              this.plugin.data.nextcloud = Object.assign({}, this.plugin.data.nextcloud, { autoSyncMinutes: parsed });
+              await this.plugin.saveData(this.plugin.data);
+              this.plugin.reconfigureAutoSync();
+            });
+        });
+    }
   }
 
   renderSignedOutState(containerEl, nextcloud) {
@@ -4456,6 +4496,11 @@ function remoteCardToLocal(remoteCard, { boardId, listId }) {
   if (!remoteCard) return null;
   const labels = Array.isArray(remoteCard.labels)
     ? remoteCard.labels.map((label) => ({
+        // Preserve the server-side id so pushBoardLabels can round-trip
+        // additions/removals through assignLabel / removeLabel. Without
+        // this, a local edit had no way to reference the label back on
+        // Nextcloud and label sync silently no-op'd.
+        remoteId: label && label.id != null ? Number(label.id) : null,
         name: String(label.title || "").trim(),
         color: decodeDeckColor(label.color) || "#d43c35",
       })).filter((label) => label.name)
@@ -4572,6 +4617,22 @@ function localCardToDeckCreate(card, opts) {
  * separately in the plugin's `data.cards` map, so this helper only returns the
  * board skeleton; the sync manager stitches cards in afterwards.
  */
+/**
+ * Convert Deck board-level label objects to the shape we cache on the local
+ * board. Retaining the remoteId is what lets pushBoardLabels resolve a
+ * local label back to its server-side counterpart when calling
+ * assignLabel / removeLabel.
+ */
+function remoteLabelsToLocal(remoteLabels) {
+  return (Array.isArray(remoteLabels) ? remoteLabels : [])
+    .map((label) => ({
+      remoteId: label && label.id != null ? Number(label.id) : null,
+      title: String((label && label.title) || "").trim(),
+      color: decodeDeckColor(label && label.color) || "#d43c35",
+    }))
+    .filter((label) => label.remoteId != null && label.title);
+}
+
 function remoteBoardToLocal(remoteBoard, remoteStacks, { boardId, folderPath }) {
   const color = decodeDeckColor(remoteBoard.color);
   const lists = (remoteStacks || [])
@@ -4592,6 +4653,10 @@ function remoteBoardToLocal(remoteBoard, remoteStacks, { boardId, folderPath }) 
     name: String(remoteBoard.title || "").trim() || "Board",
     folderPath: folderPath || "",
     lists,
+    // Board-level catalog of labels defined on Deck. Distinct from
+    // per-card `card.labels` which are resolved against this catalog when
+    // pushing.
+    labels: remoteLabelsToLocal(remoteBoard.labels),
     deletedListIds: [],
   };
 }
@@ -4635,6 +4700,10 @@ function reconcileBoardStructure(existingBoard, remoteBoard, remoteStacks) {
     etag: remoteBoard.ETag || existingBoard.etag || null,
     name: String(remoteBoard.title || "").trim() || existingBoard.name,
     lists: nextLists,
+    // Refresh the label catalog on every pull so renamed/recolored/added
+    // labels flow through. We keep the same shape used by remoteBoardToLocal
+    // (see remoteLabelsToLocal). Cards reference these by remoteId.
+    labels: remoteLabelsToLocal(remoteBoard.labels),
   };
 }
 
@@ -4654,6 +4723,7 @@ module.exports = {
   localCardToDeckCreate,
   remoteBoardToLocal,
   reconcileBoardStructure,
+  remoteLabelsToLocal,
   isRemoteTracked,
 };
   },
@@ -4934,18 +5004,32 @@ class AttachmentSyncer {
     const knownByPath = new Map(card.attachments.filter((e) => e.filePath).map((entry) => [entry.filePath, entry]));
 
     let uploaded = 0;
+    const debug = (payload) => this.plugin.debugLog(Object.assign({ scope: "attachments" }, payload));
+    debug({ event: "push.scan", cardId: card.id, dir, children: dirRef.children.length });
     for (const child of dirRef.children) {
       if (!child || child.children) continue; // skip nested directories
-      if (knownByPath.has(child.path)) continue; // already tracked
+      if (knownByPath.has(child.path)) { debug({ event: "push.skip-tracked", path: child.path }); continue; }
       try {
         const data = await this.plugin.app.vault.readBinary(child);
         const filename = sanitizeFilename(child.name);
+        debug({ event: "push.upload.request", path: child.path, filename, bytes: data.byteLength || 0 });
         const { data: response } = await client.uploadAttachment(board.remoteId, list.remoteId, card.remoteId, {
           data: new Uint8Array(data),
           filename,
           mimeType: guessMime(filename),
         });
-        if (!response || response.id == null) continue;
+        debug({ event: "push.upload.response", path: child.path, responseId: response && response.id, responseKeys: response ? Object.keys(response) : null });
+        if (!response || response.id == null) {
+          // Log this specifically — the older singular-endpoint bug made
+          // the response empty even though the file uploaded, which we
+          // want to be able to identify at a glance in diagnostics.
+          this.plugin.pushSyncLog({
+            event: "attachment-upload-empty-response",
+            cardId: card.id,
+            filename,
+          });
+          continue;
+        }
         card.attachments.push({
           remoteId: response.id,
           filePath: child.path,
@@ -4959,6 +5043,7 @@ class AttachmentSyncer {
           event: "attachment-upload-failed",
           cardId: card.id,
           filename: child.name,
+          status: error && error.status,
           message: (error && error.message) || String(error),
         });
       }
@@ -5380,6 +5465,9 @@ class SyncManager {
     await this.attachments.pushCard(client, card, localBoard, list).catch((error) => {
       this.plugin.pushSyncLog({ event: "attachment-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
     });
+    await this.pushCardLabels(client, localBoard, list, card).catch((error) => {
+      this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
+    });
 
     // If the description contains wikilink embeds that now resolve to
     // freshly-uploaded attachments, follow up with a description patch so
@@ -5462,6 +5550,9 @@ class SyncManager {
     this.plugin.debugLog({ event: "sync.push.update.done", cardId: card.id, remoteId: card.remoteId });
     this.applyRemoteToCard(card, updated, localBoard.id, list.id);
     card.localDirty = false;
+    await this.pushCardLabels(client, localBoard, list, card).catch((error) => {
+      this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
+    });
     return "pushed";
   }
 
@@ -5474,6 +5565,94 @@ class SyncManager {
     // baseline. Fields we didn't touch on Deck (checklist etc.) came back
     // unchanged, so hashing what we have is safe.
     card.baseline = snapshotBaseline(card);
+  }
+
+  /**
+   * Reconcile a card's labels with Deck. Deck's card PUT does not accept a
+   * labels array (only title/description/type/order/duedate), so label
+   * changes have to go through the dedicated assignLabel / removeLabel
+   * endpoints, keyed on the board-level label catalog.
+   *
+   * Flow per label the user has attached locally:
+   *   1. Find a matching label on the board by title (case-insensitive).
+   *   2. If none, POST /boards/{id}/labels to create one, then use its id.
+   *   3. If not yet attached to the card on Deck, PUT assignLabel.
+   * And per label attached on Deck that no longer exists locally:
+   *   - PUT removeLabel.
+   *
+   * We deliberately avoid deleting the label from the board catalog even
+   * when no card references it anymore — a user might be about to reuse it.
+   */
+  async pushCardLabels(client, localBoard, list, card) {
+    if (!card || card.remoteId == null) return;
+    const localLabels = Array.isArray(card.labels) ? card.labels : [];
+    if (!localBoard.labels) localBoard.labels = [];
+
+    // Snapshot what Deck currently has for this card. We re-fetch instead
+    // of trusting card.baseline because the baseline may be stale after a
+    // pull-then-push sequence.
+    let remoteCard;
+    try {
+      const { data } = await client.getCard(remoteBoard(localBoard), list.remoteId, card.remoteId);
+      remoteCard = data || {};
+    } catch (error) {
+      this.plugin.pushSyncLog({ event: "labels.fetch-failed", cardId: card.id, message: (error && error.message) || String(error) });
+      return;
+    }
+    const remoteLabels = Array.isArray(remoteCard.labels) ? remoteCard.labels : [];
+    const remoteByTitle = new Map(remoteLabels.map((l) => [String(l.title || "").toLowerCase(), l]));
+    const catalogByTitle = new Map(localBoard.labels.map((l) => [String(l.title || "").toLowerCase(), l]));
+
+    // 1. Ensure every local label maps to a catalog entry (create on Deck
+    //    if missing), then assign it to the card if not already attached.
+    for (const local of localLabels) {
+      const key = String(local.name || "").trim().toLowerCase();
+      if (!key) continue;
+      let catalog = catalogByTitle.get(key);
+      if (!catalog) {
+        try {
+          const { data: created } = await client.createLabel(remoteBoard(localBoard), {
+            title: local.name.trim(),
+            // Deck stores colors as bare 6-char hex without the leading '#'.
+            color: String(local.color || "31CC7C").replace(/^#/, "").padStart(6, "0").slice(0, 6),
+          });
+          if (created && created.id != null) {
+            catalog = { remoteId: Number(created.id), title: created.title || local.name, color: local.color || "#31CC7C" };
+            localBoard.labels.push(catalog);
+            catalogByTitle.set(key, catalog);
+            this.plugin.debugLog({ event: "labels.created", boardId: localBoard.id, title: local.name, remoteId: catalog.remoteId });
+          }
+        } catch (error) {
+          this.plugin.pushSyncLog({ event: "labels.create-failed", boardId: localBoard.id, title: local.name, message: (error && error.message) || String(error) });
+          continue;
+        }
+      }
+      if (!catalog || catalog.remoteId == null) continue;
+      // Also stash the resolved remoteId back on the local label so the
+      // next diff has it without needing another server round-trip.
+      local.remoteId = catalog.remoteId;
+      if (!remoteByTitle.has(key)) {
+        try {
+          await client.assignLabel(remoteBoard(localBoard), list.remoteId, card.remoteId, catalog.remoteId);
+          this.plugin.debugLog({ event: "labels.assigned", cardId: card.id, labelRemoteId: catalog.remoteId });
+        } catch (error) {
+          this.plugin.pushSyncLog({ event: "labels.assign-failed", cardId: card.id, labelRemoteId: catalog.remoteId, message: (error && error.message) || String(error) });
+        }
+      }
+    }
+
+    // 2. Remove labels the card has on Deck but no longer locally.
+    const localByTitle = new Set(localLabels.map((l) => String(l.name || "").trim().toLowerCase()).filter(Boolean));
+    for (const remote of remoteLabels) {
+      const key = String(remote.title || "").trim().toLowerCase();
+      if (!key || localByTitle.has(key)) continue;
+      try {
+        await client.removeLabel(remoteBoard(localBoard), list.remoteId, card.remoteId, remote.id);
+        this.plugin.debugLog({ event: "labels.removed", cardId: card.id, labelRemoteId: remote.id });
+      } catch (error) {
+        this.plugin.pushSyncLog({ event: "labels.remove-failed", cardId: card.id, labelRemoteId: remote.id, message: (error && error.message) || String(error) });
+      }
+    }
   }
 
   // ---- Reap ---------------------------------------------------------------
@@ -5711,6 +5890,13 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     }, 30000));
 
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
+
+    // Second ribbon: quick-access "Sync with Nextcloud" button. Exposing this
+    // outside of the settings tab shortens the loop for the most common
+    // interactive action. Only shown when Nextcloud is configured — otherwise
+    // it would silently do nothing.
+    this.nextcloudRibbonIcon = null;
+    this.updateNextcloudRibbon();
     this.addCommand({
       id: "open-board",
       name: "Open board",
@@ -5752,11 +5938,66 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         new SyncLogModal(this.app, this).open();
       },
     });
+
+    // Kick off the auto-sync scheduler last, once the rest of onload has
+    // wired up the sync manager and data. Safe no-op when disabled.
+    this.reconfigureAutoSync();
   }
 
   async onunload() {
     if (this.explorerColorStyleEl) this.explorerColorStyleEl.remove();
+    if (this.autoSyncTimer) {
+      window.clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  /**
+   * Show/hide the "Sync with Nextcloud" ribbon icon based on whether the
+   * plugin is actually connected. Called after settings changes so the
+   * icon appears immediately when the user signs in and disappears when
+   * they sign out.
+   */
+  updateNextcloudRibbon() {
+    const shouldShow = this.isNextcloudEnabled();
+    if (shouldShow && !this.nextcloudRibbonIcon) {
+      this.nextcloudRibbonIcon = this.addRibbonIcon("refresh-cw", "Sync with Nextcloud Deck", async () => {
+        const status = await this.runNextcloudSync({ manual: true });
+        if (status && status.state === "error") new Notice(`Sync failed: ${status.message}`);
+        else if (status && status.message) new Notice(status.message);
+      });
+    } else if (!shouldShow && this.nextcloudRibbonIcon) {
+      this.nextcloudRibbonIcon.remove();
+      this.nextcloudRibbonIcon = null;
+    }
+  }
+
+  /**
+   * (Re)start the periodic auto-sync timer. Called from onload, settings
+   * save, and after successful sign-in/out so the schedule reflects the
+   * current settings without needing a plugin reload.
+   */
+  reconfigureAutoSync() {
+    if (this.autoSyncTimer) {
+      window.clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
+    const nc = this.data && this.data.nextcloud;
+    if (!nc || !nc.autoSyncEnabled || !this.isNextcloudEnabled()) return;
+    // Clamp to at least a minute — running more often than that has no
+    // practical benefit and would hammer the Nextcloud instance.
+    const minutes = Math.max(1, Number(nc.autoSyncMinutes) || 15);
+    const ms = minutes * 60 * 1000;
+    this.autoSyncTimer = window.setInterval(() => {
+      // Skip if a sync is already in progress or if the window is offline.
+      if (this.nextcloudSyncInFlight) return;
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      this.runNextcloudSync({ manual: false }).catch((error) => {
+        console.error("Auto sync failed", error);
+      });
+    }, ms);
+    this.registerInterval(this.autoSyncTimer);
   }
 
   /**
@@ -5898,6 +6139,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.deckClient = null;
     await this.saveData(this.data);
     this.scheduleNextcloudSync();
+    // Now that we're connected, expose the ribbon icon and start the
+    // auto-sync timer if the user has it enabled.
+    this.updateNextcloudRibbon();
+    this.reconfigureAutoSync();
   }
 
   /**
@@ -5922,6 +6167,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.deckClient = null;
     if (this.nextcloudPullTimer) { window.clearInterval(this.nextcloudPullTimer); this.nextcloudPullTimer = null; }
     await this.saveData(this.data);
+    // Reflect the new "disconnected" state in the ribbon and stop the
+    // periodic auto-sync so we don't keep hammering a defunct client.
+    this.updateNextcloudRibbon();
+    this.reconfigureAutoSync();
   }
 
   /**
@@ -6078,18 +6327,26 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    *  manager will surface a status message instead of throwing. */
   async runNextcloudSync({ manual = false } = {}) {
     if (!this.isNextcloudEnabled()) return { state: "idle", at: Date.now(), message: "Not connected." };
-    // Absorb any orphan Markdown cards the user (or another plugin) dropped
-    // into board folders before we ship state to Nextcloud. This is what the
-    // old "Sync card notes" button used to do; folding it in here means users
-    // only need one button and can't end up out of sync.
+    // Serialize sync runs so an auto-sync tick can't stampede on top of a
+    // still-running manual sync. Returning the in-flight promise means
+    // concurrent callers see the same result instead of a spurious retry.
+    if (this.nextcloudSyncInFlight) return this.nextcloudSyncInFlight;
+    const run = (async () => {
+      try {
+        await this.syncCardsFromFolder();
+      } catch (error) {
+        // Non-fatal: proceed with the network sync even if folder scan blows up.
+        this.pushSyncLog({ event: "folder-scan-failed", message: (error && error.message) || String(error) });
+      }
+      const manager = this.getSyncManager();
+      return manager.runPull({ manual });
+    })();
+    this.nextcloudSyncInFlight = run;
     try {
-      await this.syncCardsFromFolder();
-    } catch (error) {
-      // Non-fatal: proceed with the network sync even if folder scan blows up.
-      this.pushSyncLog({ event: "folder-scan-failed", message: (error && error.message) || String(error) });
+      return await run;
+    } finally {
+      this.nextcloudSyncInFlight = null;
     }
-    const manager = this.getSyncManager();
-    return manager.runPull({ manual });
   }
 
   scheduleNextcloudSync() {

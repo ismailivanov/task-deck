@@ -324,6 +324,9 @@ class SyncManager {
     await this.attachments.pushCard(client, card, localBoard, list).catch((error) => {
       this.plugin.pushSyncLog({ event: "attachment-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
     });
+    await this.pushCardLabels(client, localBoard, list, card).catch((error) => {
+      this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
+    });
 
     // If the description contains wikilink embeds that now resolve to
     // freshly-uploaded attachments, follow up with a description patch so
@@ -406,6 +409,9 @@ class SyncManager {
     this.plugin.debugLog({ event: "sync.push.update.done", cardId: card.id, remoteId: card.remoteId });
     this.applyRemoteToCard(card, updated, localBoard.id, list.id);
     card.localDirty = false;
+    await this.pushCardLabels(client, localBoard, list, card).catch((error) => {
+      this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
+    });
     return "pushed";
   }
 
@@ -418,6 +424,94 @@ class SyncManager {
     // baseline. Fields we didn't touch on Deck (checklist etc.) came back
     // unchanged, so hashing what we have is safe.
     card.baseline = snapshotBaseline(card);
+  }
+
+  /**
+   * Reconcile a card's labels with Deck. Deck's card PUT does not accept a
+   * labels array (only title/description/type/order/duedate), so label
+   * changes have to go through the dedicated assignLabel / removeLabel
+   * endpoints, keyed on the board-level label catalog.
+   *
+   * Flow per label the user has attached locally:
+   *   1. Find a matching label on the board by title (case-insensitive).
+   *   2. If none, POST /boards/{id}/labels to create one, then use its id.
+   *   3. If not yet attached to the card on Deck, PUT assignLabel.
+   * And per label attached on Deck that no longer exists locally:
+   *   - PUT removeLabel.
+   *
+   * We deliberately avoid deleting the label from the board catalog even
+   * when no card references it anymore — a user might be about to reuse it.
+   */
+  async pushCardLabels(client, localBoard, list, card) {
+    if (!card || card.remoteId == null) return;
+    const localLabels = Array.isArray(card.labels) ? card.labels : [];
+    if (!localBoard.labels) localBoard.labels = [];
+
+    // Snapshot what Deck currently has for this card. We re-fetch instead
+    // of trusting card.baseline because the baseline may be stale after a
+    // pull-then-push sequence.
+    let remoteCard;
+    try {
+      const { data } = await client.getCard(remoteBoard(localBoard), list.remoteId, card.remoteId);
+      remoteCard = data || {};
+    } catch (error) {
+      this.plugin.pushSyncLog({ event: "labels.fetch-failed", cardId: card.id, message: (error && error.message) || String(error) });
+      return;
+    }
+    const remoteLabels = Array.isArray(remoteCard.labels) ? remoteCard.labels : [];
+    const remoteByTitle = new Map(remoteLabels.map((l) => [String(l.title || "").toLowerCase(), l]));
+    const catalogByTitle = new Map(localBoard.labels.map((l) => [String(l.title || "").toLowerCase(), l]));
+
+    // 1. Ensure every local label maps to a catalog entry (create on Deck
+    //    if missing), then assign it to the card if not already attached.
+    for (const local of localLabels) {
+      const key = String(local.name || "").trim().toLowerCase();
+      if (!key) continue;
+      let catalog = catalogByTitle.get(key);
+      if (!catalog) {
+        try {
+          const { data: created } = await client.createLabel(remoteBoard(localBoard), {
+            title: local.name.trim(),
+            // Deck stores colors as bare 6-char hex without the leading '#'.
+            color: String(local.color || "31CC7C").replace(/^#/, "").padStart(6, "0").slice(0, 6),
+          });
+          if (created && created.id != null) {
+            catalog = { remoteId: Number(created.id), title: created.title || local.name, color: local.color || "#31CC7C" };
+            localBoard.labels.push(catalog);
+            catalogByTitle.set(key, catalog);
+            this.plugin.debugLog({ event: "labels.created", boardId: localBoard.id, title: local.name, remoteId: catalog.remoteId });
+          }
+        } catch (error) {
+          this.plugin.pushSyncLog({ event: "labels.create-failed", boardId: localBoard.id, title: local.name, message: (error && error.message) || String(error) });
+          continue;
+        }
+      }
+      if (!catalog || catalog.remoteId == null) continue;
+      // Also stash the resolved remoteId back on the local label so the
+      // next diff has it without needing another server round-trip.
+      local.remoteId = catalog.remoteId;
+      if (!remoteByTitle.has(key)) {
+        try {
+          await client.assignLabel(remoteBoard(localBoard), list.remoteId, card.remoteId, catalog.remoteId);
+          this.plugin.debugLog({ event: "labels.assigned", cardId: card.id, labelRemoteId: catalog.remoteId });
+        } catch (error) {
+          this.plugin.pushSyncLog({ event: "labels.assign-failed", cardId: card.id, labelRemoteId: catalog.remoteId, message: (error && error.message) || String(error) });
+        }
+      }
+    }
+
+    // 2. Remove labels the card has on Deck but no longer locally.
+    const localByTitle = new Set(localLabels.map((l) => String(l.name || "").trim().toLowerCase()).filter(Boolean));
+    for (const remote of remoteLabels) {
+      const key = String(remote.title || "").trim().toLowerCase();
+      if (!key || localByTitle.has(key)) continue;
+      try {
+        await client.removeLabel(remoteBoard(localBoard), list.remoteId, card.remoteId, remote.id);
+        this.plugin.debugLog({ event: "labels.removed", cardId: card.id, labelRemoteId: remote.id });
+      } catch (error) {
+        this.plugin.pushSyncLog({ event: "labels.remove-failed", cardId: card.id, labelRemoteId: remote.id, message: (error && error.message) || String(error) });
+      }
+    }
   }
 
   // ---- Reap ---------------------------------------------------------------

@@ -76,6 +76,11 @@ function remoteCardToLocal(remoteCard, { boardId, listId }) {
   if (!remoteCard) return null;
   const labels = Array.isArray(remoteCard.labels)
     ? remoteCard.labels.map((label) => ({
+        // Preserve the server-side id so pushBoardLabels can round-trip
+        // additions/removals through assignLabel / removeLabel. Without
+        // this, a local edit had no way to reference the label back on
+        // Nextcloud and label sync silently no-op'd.
+        remoteId: label && label.id != null ? Number(label.id) : null,
         name: String(label.title || "").trim(),
         color: decodeDeckColor(label.color) || "#d43c35",
       })).filter((label) => label.name)
@@ -192,6 +197,22 @@ function localCardToDeckCreate(card, opts) {
  * separately in the plugin's `data.cards` map, so this helper only returns the
  * board skeleton; the sync manager stitches cards in afterwards.
  */
+/**
+ * Convert Deck board-level label objects to the shape we cache on the local
+ * board. Retaining the remoteId is what lets pushBoardLabels resolve a
+ * local label back to its server-side counterpart when calling
+ * assignLabel / removeLabel.
+ */
+function remoteLabelsToLocal(remoteLabels) {
+  return (Array.isArray(remoteLabels) ? remoteLabels : [])
+    .map((label) => ({
+      remoteId: label && label.id != null ? Number(label.id) : null,
+      title: String((label && label.title) || "").trim(),
+      color: decodeDeckColor(label && label.color) || "#d43c35",
+    }))
+    .filter((label) => label.remoteId != null && label.title);
+}
+
 function remoteBoardToLocal(remoteBoard, remoteStacks, { boardId, folderPath }) {
   const color = decodeDeckColor(remoteBoard.color);
   const lists = (remoteStacks || [])
@@ -212,6 +233,10 @@ function remoteBoardToLocal(remoteBoard, remoteStacks, { boardId, folderPath }) 
     name: String(remoteBoard.title || "").trim() || "Board",
     folderPath: folderPath || "",
     lists,
+    // Board-level catalog of labels defined on Deck. Distinct from
+    // per-card `card.labels` which are resolved against this catalog when
+    // pushing.
+    labels: remoteLabelsToLocal(remoteBoard.labels),
     deletedListIds: [],
   };
 }
@@ -255,6 +280,10 @@ function reconcileBoardStructure(existingBoard, remoteBoard, remoteStacks) {
     etag: remoteBoard.ETag || existingBoard.etag || null,
     name: String(remoteBoard.title || "").trim() || existingBoard.name,
     lists: nextLists,
+    // Refresh the label catalog on every pull so renamed/recolored/added
+    // labels flow through. We keep the same shape used by remoteBoardToLocal
+    // (see remoteLabelsToLocal). Cards reference these by remoteId.
+    labels: remoteLabelsToLocal(remoteBoard.labels),
   };
 }
 
@@ -274,5 +303,6 @@ module.exports = {
   localCardToDeckCreate,
   remoteBoardToLocal,
   reconcileBoardStructure,
+  remoteLabelsToLocal,
   isRemoteTracked,
 };

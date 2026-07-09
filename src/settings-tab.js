@@ -184,6 +184,41 @@ class TaskDeckSettingTab extends PluginSettingTab {
             button.setDisabled(false);
           });
       });
+
+    // Automatic periodic sync. Off by default — some users prefer manual
+    // sync for predictable network use. Minutes-granularity is coarse on
+    // purpose: a more aggressive schedule would hammer the Nextcloud
+    // instance without meaningful benefit for a task board.
+    new Setting(containerEl)
+      .setName("Automatic sync")
+      .setDesc("Run Sync with Nextcloud in the background on a schedule. Sync is also available from a ribbon icon on the left side.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(!!nextcloud.autoSyncEnabled)
+          .onChange(async (value) => {
+            this.plugin.data.nextcloud = Object.assign({}, this.plugin.data.nextcloud, { autoSyncEnabled: value });
+            await this.plugin.saveData(this.plugin.data);
+            this.plugin.reconfigureAutoSync();
+            this.display();
+          });
+      });
+
+    if (nextcloud.autoSyncEnabled) {
+      new Setting(containerEl)
+        .setName("Sync interval (minutes)")
+        .setDesc("Minimum is 1 minute. Reasonable values: 5-30 for laptops, 60+ for background devices.")
+        .addText((text) => {
+          text
+            .setPlaceholder("15")
+            .setValue(String(nextcloud.autoSyncMinutes || 15))
+            .onChange(async (raw) => {
+              const parsed = Math.max(1, Math.floor(Number(raw) || 15));
+              this.plugin.data.nextcloud = Object.assign({}, this.plugin.data.nextcloud, { autoSyncMinutes: parsed });
+              await this.plugin.saveData(this.plugin.data);
+              this.plugin.reconfigureAutoSync();
+            });
+        });
+    }
   }
 
   renderSignedOutState(containerEl, nextcloud) {

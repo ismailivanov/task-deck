@@ -53,6 +53,11 @@ const DEFAULT_NEXTCLOUD = {
   boardBindings: {},
   lastSyncAt: 0,
   syncIntervalMs: 60000,
+  // Auto-sync: when enabled, runNextcloudSync fires every autoSyncMinutes.
+  // Off by default to preserve the manual model people are used to; also
+  // avoids surprising folks with unexpected background traffic.
+  autoSyncEnabled: false,
+  autoSyncMinutes: 15,
   // prompt | local | remote | newer-wins — see docs/plan §5.
   conflictPolicy: "prompt",
   // Attachments are Phase 2 territory; the toggle is here so the data schema
