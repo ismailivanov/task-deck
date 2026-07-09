@@ -56,6 +56,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     // delivered is never clobbered by our (possibly stale) in-memory card.
     this.diskSignatures = new Map();
     this.pendingResync = false;
+    this.resyncTimer = null;
 
     addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
@@ -711,9 +712,41 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       && this.data.boards.some((board) => file.path === this.boardIndexPath(board) || file.path === this.legacyBoardIndexPath(board)));
   }
 
+  /**
+   * Re-import card notes from disk shortly after a write was skipped (or an event
+   * was held back while a modal was open), so memory converges on what's actually
+   * on disk. Waits until nothing is reconciling / being edited.
+   */
+  queueResync() {
+    window.clearTimeout(this.resyncTimer);
+    this.resyncTimer = window.setTimeout(async () => {
+      if (this.reconciling || this.editingCardId) {
+        this.queueResync(); // still busy — try again shortly
+        return;
+      }
+      if (!this.pendingResync) return;
+      this.pendingResync = false;
+      try {
+        await this.syncCardsFromFolder();
+        await this.saveData(this.data);
+      } catch (error) {
+        console.error("Task Deck: resync failed", error);
+      }
+      this.refreshViews();
+    }, 1500);
+  }
+
   queueCardFolderSync(file, eventName) {
     // Ignore the writes our own startup reconcile makes; it re-imports at the end.
     if (this.reconciling) return;
+    // Never re-import (and never advance a card's disk signature) while a card
+    // modal is open — the modal holds its own copy, so importing underneath it
+    // would let its next save overwrite whatever just arrived. Catch up after.
+    if (this.editingCardId) {
+      this.pendingResync = true;
+      this.queueResync();
+      return;
+    }
     // Also re-sync when the board INDEX file changes, so a list add/rename/reorder
     // made on another device (which only edits the index) is picked up here.
     if (!this.isCardFile(file) && !this.isBoardFolder(file) && !this.isBoardIndexFile(file)) return;
@@ -1108,7 +1141,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   async writeAllCardFiles() {
     for (const card of Object.values(this.data.cards)) {
-      await this.writeCardFile(card);
+      await this.writeCardFile(card, { bulk: true });
     }
   }
 
@@ -1783,7 +1816,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    * Frontmatter stores board metadata. The Details and Checklist sections stay
    * as normal Markdown so users can edit card content directly in the vault.
    */
-  async writeCardFile(card) {
+  async writeCardFile(card, options = {}) {
     const board = this.findBoardForCard(card);
     if (board) card.boardId = board.id;
     await this.ensureBoardFolder(board);
@@ -1837,12 +1870,23 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     // The file changed on disk since we last read it — e.g. a sync just delivered
     // a newer note from another device (checklist assignees, labels, details…).
-    // NEVER overwrite it with our possibly-stale in-memory card: keep the disk
-    // copy and re-import it once this pass is over.
+    // NEVER overwrite it with our possibly-stale in-memory card.
     const seen = this.diskSignatures.get(card.id);
-    if (current !== null && seen !== undefined && current !== seen) {
+    const changedUnderUs = current !== null && seen !== undefined && current !== seen;
+    // A bulk rewrite must not blind-overwrite a file we never read this session:
+    // we have no baseline, so we can't tell our memory from a fresh delivery.
+    // (A user-initiated write still lands — dropping it would lose their edit.)
+    const unknownDisk = options.bulk && current !== null && seen === undefined;
+
+    if (changedUnderUs || unknownDisk) {
       this.diskSignatures.set(card.id, current);
       this.pendingResync = true;
+      // Don't let a user's edit vanish silently; the resync below repaints the
+      // board with what's actually on disk.
+      if (!options.bulk && changedUnderUs) {
+        new Notice("This card changed elsewhere — your edit wasn't saved. Reopen it to see the latest.");
+      }
+      this.queueResync();
       return;
     }
 
