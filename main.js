@@ -3536,6 +3536,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.cardLocks = new Map();
     this.editingCardId = null;
 
+    // The exact Markdown we last read from (or wrote to) each card file, keyed by
+    // card id. writeCardFile compares against it so a note another device just
+    // delivered is never clobbered by our (possibly stale) in-memory card.
+    this.diskSignatures = new Map();
+    this.pendingResync = false;
+
     addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
@@ -3658,6 +3664,19 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       if (restored || renamed || deduped || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
     } finally {
       this.reconciling = false;
+    }
+
+    // A write was skipped because the note on disk was newer than our memory
+    // (a sync delivered it mid-reconcile, and its event was swallowed while
+    // `reconciling`). Import it now that events flow again.
+    if (this.pendingResync) {
+      this.pendingResync = false;
+      try {
+        await this.syncCardsFromFolder();
+        await this.saveData(this.data);
+      } catch (error) {
+        console.error("Task Deck: post-reconcile resync failed", error);
+      }
     }
     this.refreshViews();
   }
@@ -4408,6 +4427,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         filePath: file.path,
         updatedAt: card.updatedAt || now,
       });
+      // Remember exactly what this card's file looked like on disk, so a later
+      // writeCardFile can tell "nothing changed" from "someone else changed it".
+      this.diskSignatures.set(card.id, markdown);
+
       if (await this.normalizeCardFilePath(card)) changed = true;
 
       if (!this.data.cards[card.id]) {
@@ -4793,6 +4816,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (parsed.position !== null) card.position = parsed.position;
     card.details = parsed.details;
     card.checklist = parsed.checklist;
+    this.diskSignatures.set(card.id, markdown);
   }
 
   async openCardFile(cardId) {
@@ -5283,11 +5307,32 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     ].join("\n");
 
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
-    if (file && file.extension === "md") {
-      await this.app.vault.modify(file, markdown);
-    } else {
+    if (!file || file.extension !== "md") {
       await this.app.vault.create(card.filePath, markdown);
+      this.diskSignatures.set(card.id, markdown);
+      return;
     }
+
+    let current = null;
+    try { current = await this.app.vault.read(file); } catch (error) { current = null; }
+
+    // Already byte-identical: don't touch the file. Avoids a pointless mtime bump
+    // that would make the sync push a needless copy.
+    if (current === markdown) return;
+
+    // The file changed on disk since we last read it — e.g. a sync just delivered
+    // a newer note from another device (checklist assignees, labels, details…).
+    // NEVER overwrite it with our possibly-stale in-memory card: keep the disk
+    // copy and re-import it once this pass is over.
+    const seen = this.diskSignatures.get(card.id);
+    if (current !== null && seen !== undefined && current !== seen) {
+      this.diskSignatures.set(card.id, current);
+      this.pendingResync = true;
+      return;
+    }
+
+    await this.app.vault.modify(file, markdown);
+    this.diskSignatures.set(card.id, markdown);
   }
 };
 
