@@ -328,20 +328,17 @@ class SyncManager {
       this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
     });
 
-    // If the description contains wikilink embeds that now resolve to
-    // freshly-uploaded attachments, follow up with a description patch so
-    // Deck's renderer sees the CommonMark version. Skipped when there's no
-    // wikilink or no attachment metadata worth rewriting.
-    const rewritten = rewriteWikilinksForDeck(payload.description || "", card);
-    if (rewritten && rewritten !== payload.description) {
-      try {
-        const { data: updated } = await client.updateCard(remoteBoard(localBoard), list.remoteId, card.remoteId, Object.assign({}, payload, { description: rewritten }));
-        if (updated) this.applyRemoteToCard(card, updated, localBoard.id, list.id);
-        this.plugin.debugLog({ event: "sync.push.create.wikilink-rewrite", cardId: card.id });
-      } catch (error) {
-        this.plugin.pushSyncLog({ event: "wikilink-rewrite-failed", cardId: card.id, message: (error && error.message) || String(error) });
-      }
-    }
+    // NOTE: previous versions of this method followed up with a second
+    // updateCard call that rewrote description-embedded Obsidian wikilinks
+    // (`![[…]]`) into either a Deck attachment URL or the bare filename.
+    // That rewrite is what caused the "云端 description 里图片位置变成
+    // 图片名字" symptom. Deck's Markdown renderer is a plain CommonMark
+    // parser and doesn't know about `![[…]]` syntax, but at worst it will
+    // display the raw text — which is strictly better than us mangling
+    // the user's content on their behalf. So we now leave description
+    // exactly as the user typed it. Attachment reconciliation happens
+    // through the dedicated attachment endpoints, not through description
+    // text substitution. (See plan: attachment-rework-plan.md.)
   }
 
   async pushUpdate(client, localBoard, list, card, remoteSnapshot, policy) {
@@ -391,7 +388,10 @@ class SyncManager {
     });
 
     const payload = localCardToDeckPatch(card, { owner: this.plugin.data.nextcloud.username });
-    payload.description = rewriteWikilinksForDeck(payload.description, card);
+    // NOTE: no more wikilink rewrite. Description is shipped exactly as
+    // the user typed it — Deck may display `![[…]]` as raw text but at
+    // least we're not silently editing user content. See pushCreate for
+    // the full rationale.
     const board = remoteBoard(localBoard);
     this.plugin.debugLog({
       event: "sync.push.update.request",
@@ -599,54 +599,15 @@ function buildRemoteCardIndex(remoteStacks) {
   return index;
 }
 
-/**
- * Strip Obsidian wikilink embeds from a description before it goes to Deck.
- *
- * Rationale (see Deck REST docs, "Attachments" section): Deck's attachments
- * are a first-class module attached to the card, not embedded through
- * description Markdown. Deck's Web UI renders attachments in a dedicated
- * area below the description; it does NOT re-render `![[...]]` (unknown
- * syntax) nor `![](/index.php/apps/deck/cards/.../attachment/...)` (the
- * server refuses same-origin embed with CSP for security).
- *
- * So on push we just remove the wikilink embed lines that point to a file
- * we've already uploaded via the attachments API — the user still sees the
- * image in Deck's attachments panel. For wikilinks we cannot resolve
- * (references to notes, unsynced files) we replace the embed with a plain
- * `[caption]` label so Deck at least renders readable text instead of the
- * raw double-bracket blob.
- *
- * On pull we restore the wikilink form so Obsidian keeps rendering the
- * inline embed (attachments are downloaded into the vault by
- * AttachmentSyncer).
- */
-function rewriteWikilinksForDeck(description, card) {
-  if (typeof description !== "string" || !description) return description;
-  if (!card) return description;
-  const attachmentsByName = new Map();
-  (Array.isArray(card.attachments) ? card.attachments : []).forEach((att) => {
-    if (att && att.filename) {
-      attachmentsByName.set(String(att.filename).toLowerCase(), att);
-    }
-  });
-
-  const wikilinkRe = /(!?)\[\[([^\]]+)\]\]/g;
-  return description.replace(wikilinkRe, (match, bang, inner) => {
-    const parts = String(inner).split("|");
-    const target = parts[0].trim();
-    const alias = (parts[1] || "").trim();
-    const base = target.split("/").pop();
-    const att = base ? attachmentsByName.get(base.toLowerCase()) : null;
-    if (att) {
-      // Drop the embed entirely. The file lives on the card's attachment
-      // panel — no need to duplicate it in the description body.
-      return "";
-    }
-    // Unresolvable — keep something readable instead of the raw brackets.
-    const caption = alias || base || target;
-    return caption;
-  });
-}
+// The `rewriteWikilinksForDeck` helper that used to live here has been
+// removed. It attempted to translate Obsidian's `![[…]]` embeds into
+// something Deck's description renderer could handle. Two rounds of
+// experimentation (CommonMark image link with an internal /apps/deck URL,
+// then dropping the embed / substituting the filename caption) both
+// mangled user content on the server side. Attachments are handled through
+// the dedicated attachment API instead; description text is now shipped
+// verbatim. See .trae/documents/attachment-rework-plan.md for the full
+// history.
 
 module.exports = {
   SyncManager,
