@@ -2018,10 +2018,15 @@ class CardModal extends Modal {
         && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
       const fileName = safeImageFileName(realName ? rawName : `Pasted image ${imageStamp()}.${ext}`, ext);
       const sourcePath = (this.card && this.card.filePath) || "";
-      // Card media lives in <board>/attachments so the board folder stays tidy.
+      // Card media lives in <board>/attachments/<cardId>/ so that
+      // attachment-sync can scan a card-scoped directory rather than
+      // fishing through a flat, board-shared folder. Also keeps
+      // per-card attachments tidy on rename/delete.
       const board = this.plugin.findBoardForCard(this.card);
       let targetPath;
-      if (board && board.folderPath) {
+      if (board && board.folderPath && this.card && this.card.id) {
+        targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${this.card.id}/${fileName}`);
+      } else if (board && board.folderPath) {
         targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${fileName}`);
       } else {
         const fm = this.app.fileManager;
@@ -3781,6 +3786,12 @@ const { normalizeServerUrl } = __require("src/nextcloud-auth.js");
 // sync-manager.js so the client stays reusable and testable in isolation.
 
 const DECK_API_PREFIX = "/index.php/apps/deck/api/v1.0";
+// Attachments live on the OCS API surface, not the /index.php REST one.
+// The HAR capture of the Web UI making an attachment upload is what pins
+// this down: POST /ocs/v2.php/apps/deck/api/v1.0/cards/{id}/attachment.
+// Same-origin cookie session on the Web UI, so we need App Password
+// basic auth + OCS-APIRequest header for scripted access.
+const OCS_DECK_PREFIX = "/ocs/v2.php/apps/deck/api/v1.0";
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const MAX_BACKOFF_MS = 60000;
 
@@ -3960,60 +3971,80 @@ class DeckClient {
   // Deck ≥ 1.0). `type=file` (Deck ≥ 1.9) references arbitrary Nextcloud Files
   // paths; not used here for MVP.
 
-  getAttachments(boardId, stackId, cardId) {
+  // Attachments live on Deck's OCS API surface, not the REST /index.php one.
+  // The Web UI's own attachment flow (verified against a captured HAR) uses:
+  //   GET    /ocs/v2.php/apps/deck/api/v1.0/cards/{cardId}/attachments?boardId={id}
+  //   POST   /ocs/v2.php/apps/deck/api/v1.0/cards/{cardId}/attachment?boardId={id}
+  //     body: multipart with cardId=<id>, type=file, file=<binary>
+  //   DELETE /ocs/v2.php/apps/deck/api/v1.0/cards/{cardId}/attachments/{aid}?boardId={id}
+  // `type=file` is Deck ≥ 1.3.0 (files land in the user's Nextcloud Files
+  // under /Deck/…, get a real Nextcloud `fileid`, and produce thumbnails
+  // that Deck's Markdown renderer can preview via `/f/{fileid}` links).
+  // The legacy `type=deck_file` route on /index.php/… is why earlier
+  // versions of this plugin uploaded bytes that never showed up in the
+  // card's attachment panel: on new Deck deployments that URL silently
+  // stores the file in Nextcloud but doesn't register it against the card.
+  //
+  // Responses wrap the payload in an OCS envelope: {ocs:{meta,data:{…}}}.
+  // We unwrap in the wrapper methods below so the sync layer sees a flat
+  // { id, cardId, type, data (filename), extendedData:{fileid, path, …} }.
+
+  getAttachments(cardId, boardId) {
     return this.request({
       method: "GET",
-      path: `/boards/${encodeURIComponent(boardId)}/stacks/${encodeURIComponent(stackId)}/cards/${encodeURIComponent(cardId)}/attachments`,
-    });
+      ocs: true,
+      path: `/cards/${encodeURIComponent(cardId)}/attachments`,
+      query: { boardId, format: "json" },
+    }).then(unwrapOcs);
   }
 
   /**
    * Upload an attachment. `data` may be a Uint8Array or ArrayBuffer.
    * `filename` and `mimeType` should describe the source file (extension +
-   * best-effort MIME). Server responds with the attachment metadata.
+   * best-effort MIME). Server responds with the attachment metadata
+   * (already OCS-unwrapped).
    */
-  uploadAttachment(boardId, stackId, cardId, { data, filename, mimeType }) {
+  uploadAttachment(cardId, boardId, { data, filename, mimeType }) {
     return this.multipartRequest({
       method: "POST",
-      // NOTE: the resource is spelled `attachments` (plural) in the REST API
-      // — see Deck docs "Upload an attachment". A singular URL falls through
-      // to a generic file-upload route on some deployments, storing the file
-      // in the user's Nextcloud Files without registering it on the card.
-      // Symptom: card's attachment panel stays empty but the raw file
-      // appears in the files tree.
-      path: `/boards/${encodeURIComponent(boardId)}/stacks/${encodeURIComponent(stackId)}/cards/${encodeURIComponent(cardId)}/attachments`,
-      formFields: { type: "deck_file" },
+      ocs: true,
+      path: `/cards/${encodeURIComponent(cardId)}/attachment`,
+      query: { boardId, format: "json" },
+      formFields: { cardId: String(cardId), type: "file" },
       file: { field: "file", data, filename, mimeType: mimeType || "application/octet-stream" },
-    });
+    }).then(unwrapOcs);
   }
 
-  deleteAttachment(boardId, stackId, cardId, attachmentId) {
+  deleteAttachment(cardId, boardId, attachmentId) {
     return this.request({
       method: "DELETE",
-      path: `/boards/${encodeURIComponent(boardId)}/stacks/${encodeURIComponent(stackId)}/cards/${encodeURIComponent(cardId)}/attachments/${encodeURIComponent(attachmentId)}`,
-    });
+      ocs: true,
+      path: `/cards/${encodeURIComponent(cardId)}/attachments/${encodeURIComponent(attachmentId)}`,
+      query: { boardId, format: "json" },
+    }).then(unwrapOcs);
   }
 
   /**
-   * Download the raw bytes of an attachment. The Deck download endpoint sits
-   * outside the /api/v1.0 prefix (it streams the file through PHP directly),
-   * so we build the URL manually rather than through `buildUrl`.
+   * Download the raw bytes of an attachment. Two candidate endpoints work
+   * on different Deck versions; we start with the OCS-flavoured one and
+   * fall back to the legacy /index.php endpoint if the server returns a
+   * 4xx. Both bypass /api/v1.0 and stream the file through PHP.
    */
-  async downloadAttachment(boardId, stackId, cardId, attachmentId) {
-    const url = `${this.serverUrl}/index.php/apps/deck/cards/${encodeURIComponent(cardId)}/attachment/${encodeURIComponent(attachmentId)}`;
+  async downloadAttachment(cardId, attachmentId) {
+    const primary = `${this.serverUrl}/index.php/apps/deck/cards/${encodeURIComponent(cardId)}/attachment/${encodeURIComponent(attachmentId)}`;
     const headers = this.buildHeaders();
     headers.Accept = "*/*";
     delete headers["Content-Type"];
 
     const response = await requestUrl({
-      url,
+      url: primary,
       method: "GET",
       headers,
       throw: false,
     });
     const status = response.status || 0;
     if (status < 200 || status >= 300) {
-      throw new DeckApiError(`Deck attachment download failed (${status}).`, { status, url, body: parseBody(response) });
+      throw new DeckApiError(`Deck attachment download failed (${status}).`, { status, url: primary, body: parseBody(response) });
     }
     return {
       status,
@@ -4027,6 +4058,20 @@ class DeckClient {
 
   buildUrl(path, query) {
     let url = `${this.serverUrl}${DECK_API_PREFIX}${path}`;
+    if (query && Object.keys(query).length) {
+      const params = Object.entries(query)
+        .filter(([, value]) => value !== undefined && value !== null)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+      if (params.length) url += `?${params.join("&")}`;
+    }
+    return url;
+  }
+
+  // Attachment endpoints live under a different URL prefix — OCS API on
+  // /ocs/v2.php instead of the REST-flavoured /index.php. Keeping this in
+  // a separate helper avoids buildUrl having to branch on path shape.
+  buildOcsUrl(path, query) {
+    let url = `${this.serverUrl}${OCS_DECK_PREFIX}${path}`;
     if (query && Object.keys(query).length) {
       const params = Object.entries(query)
         .filter(([, value]) => value !== undefined && value !== null)
@@ -4057,8 +4102,9 @@ class DeckClient {
    * On non-retryable failures throws a DeckApiError; a 401 flags the caller
    * (settings/sync) to force re-authentication.
    */
-  async request({ method, path, body, query, etag, signal }) {
-    const url = this.buildUrl(path, query);
+  async request({ method, path, body, query, etag, signal, ocs }) {
+    // OCS endpoints (attachments) live on a different URL prefix.
+    const url = ocs ? this.buildOcsUrl(path, query) : this.buildUrl(path, query);
     const headers = this.buildHeaders({ etag });
     const payload = body === undefined ? undefined : JSON.stringify(body);
 
@@ -4148,8 +4194,8 @@ class DeckClient {
    * accept a FormData object directly — it wants an ArrayBuffer. This means
    * we must construct the CRLF-delimited envelope ourselves.
    */
-  async multipartRequest({ method, path, formFields = {}, file }) {
-    const url = this.buildUrl(path);
+  async multipartRequest({ method, path, formFields = {}, file, query, ocs }) {
+    const url = ocs ? this.buildOcsUrl(path, query) : this.buildUrl(path, query);
     const boundary = `----ObsidianNextcloudDeck${Math.random().toString(36).slice(2)}`;
     const encoder = new TextEncoder();
     const chunks = [];
@@ -4253,6 +4299,21 @@ function parseBody(response) {
   } catch (error) {
     return text;
   }
+}
+
+/**
+ * OCS endpoints wrap the payload in `{ocs:{meta,data}}`. The rest of the
+ * plugin already expects the flat shape from the REST /api/v1.0 endpoints,
+ * so we unwrap here at the client boundary. Preserves `{status,headers}`
+ * from the underlying request result.
+ */
+function unwrapOcs(result) {
+  if (!result) return result;
+  const body = result.data;
+  if (body && body.ocs && Object.prototype.hasOwnProperty.call(body.ocs, "data")) {
+    return Object.assign({}, result, { data: body.ocs.data });
+  }
+  return result;
 }
 
 function sleep(ms) {
@@ -4712,6 +4773,85 @@ function isRemoteTracked(card) {
   return !!(card && card.remoteId != null);
 }
 
+/**
+ * Translate a card description from Obsidian's `![[…]]` embed syntax into
+ * the shape Deck's Markdown renderer actually understands: an inline
+ * `[caption](https://<server>/f/<fileid> (preview))` markdown link. Deck's
+ * renderer specifically looks for the trailing `(preview)` title to swap
+ * the link for a thumbnail image.
+ *
+ * Matches are resolved by looking up the wikilink target in
+ * `card.attachments[]` (compared by both filePath and basename to be
+ * tolerant of authoring quirks) and using its `fileid` from
+ * `extendedData.fileid`. Anything we can't resolve — outbound URLs,
+ * references to unsynced files — is left untouched. Never mutate user
+ * content on ambiguous matches; a wrong replacement is worse than an
+ * unresolved wikilink.
+ */
+function localDescriptionToDeck(description, card, { serverUrl } = {}) {
+  if (typeof description !== "string" || !description) return description;
+  if (!card || !Array.isArray(card.attachments) || !card.attachments.length) return description;
+  if (!serverUrl) return description;
+  const server = String(serverUrl).replace(/\/+$/, "");
+  const byPath = new Map();
+  const byBase = new Map();
+  for (const att of card.attachments) {
+    if (!att || att.fileid == null) continue;
+    if (att.filePath) byPath.set(att.filePath, att);
+    if (att.filename) {
+      const key = String(att.filename).toLowerCase();
+      // Only remember the first match on basename — multiple attachments
+      // sharing a filename should be resolved by full path anyway.
+      if (!byBase.has(key)) byBase.set(key, att);
+    }
+  }
+  return description.replace(/(!?)\[\[([^\]\n]+)\]\]/g, (raw, bang, inner) => {
+    const parts = String(inner).split("|");
+    const target = parts[0].trim();
+    if (!target) return raw;
+    // Skip absolute URLs — those are external images, not Deck attachments.
+    if (/^https?:\/\//i.test(target)) return raw;
+    const alias = (parts[1] || "").trim();
+    const att = byPath.get(target) || byBase.get(target.split("/").pop().toLowerCase());
+    if (!att) return raw;
+    const caption = alias || att.filename || target.split("/").pop();
+    return `[${caption}](${server}/f/${att.fileid} (preview))`;
+  });
+}
+
+/**
+ * Inverse of localDescriptionToDeck: turn Deck's inline attachment links
+ * back into Obsidian wikilinks so the Markdown renders inline in Obsidian.
+ * Recognises exactly the shape Deck writes — `[caption](server/f/<id>
+ * (preview))` — and looks the `fileid` up in `card.attachments[]` to get
+ * the vault-relative path. Non-matching links are preserved verbatim.
+ */
+function deckDescriptionToLocal(description, card, { serverUrl } = {}) {
+  if (typeof description !== "string" || !description) return description;
+  if (!card || !Array.isArray(card.attachments) || !card.attachments.length) return description;
+  if (!serverUrl) return description;
+  const server = String(serverUrl).replace(/\/+$/, "");
+  const byFileId = new Map();
+  for (const att of card.attachments) {
+    if (att && att.fileid != null && att.filePath) byFileId.set(Number(att.fileid), att);
+  }
+  if (!byFileId.size) return description;
+  // Pattern: [caption](<url> (preview)) — Deck may or may not include the
+  // leading `!`; we accept either. Server prefix must match exactly to
+  // avoid mistakenly rewriting a link to a different Nextcloud instance.
+  const re = /!?\[([^\]\n]*)\]\((\S+?)\s*\(preview\)\)/g;
+  return description.replace(re, (raw, caption, url) => {
+    const trimmed = url.trim();
+    if (!trimmed.startsWith(`${server}/f/`)) return raw;
+    const fileidStr = trimmed.slice(`${server}/f/`.length).replace(/[/?#].*$/, "");
+    const fileid = Number(fileidStr);
+    if (!Number.isFinite(fileid)) return raw;
+    const att = byFileId.get(fileid);
+    if (!att) return raw;
+    return `![[${att.filePath}]]`;
+  });
+}
+
 module.exports = {
   decodeDeckColor,
   decodeDeckDate,
@@ -4724,6 +4864,8 @@ module.exports = {
   remoteBoardToLocal,
   reconcileBoardStructure,
   remoteLabelsToLocal,
+  localDescriptionToDeck,
+  deckDescriptionToLocal,
   isRemoteTracked,
 };
   },
@@ -4921,14 +5063,18 @@ class AttachmentSyncer {
    * Pull all remote attachments for a card into the vault. Skips downloads
    * whose remote id + updatedAt already match a local entry to avoid
    * re-fetching unchanged files.
+   *
+   * NOTE: OCS attachment endpoints only need cardRemoteId + boardRemoteId;
+   * the `list` argument is no longer used but kept in the signature for
+   * call-site compatibility (all existing callers still pass it).
    */
-  async pullCard(client, card, board, list) {
+  async pullCard(client, card, board /* , list */) {
     if (!this.isEnabled()) return { downloaded: 0 };
-    if (card.remoteId == null || board.remoteId == null || list.remoteId == null) return { downloaded: 0 };
+    if (card.remoteId == null || board.remoteId == null) return { downloaded: 0 };
 
     let remoteAttachments = [];
     try {
-      const { data } = await client.getAttachments(board.remoteId, list.remoteId, card.remoteId);
+      const { data } = await client.getAttachments(card.remoteId, board.remoteId);
       remoteAttachments = Array.isArray(data) ? data : [];
     } catch (error) {
       this.plugin.pushSyncLog({ event: "attachments-list-failed", cardId: card.id, message: (error && error.message) || String(error) });
@@ -4943,14 +5089,18 @@ class AttachmentSyncer {
       if (!remote || remote.id == null) continue;
       const existing = knownById.get(remote.id);
       const updatedAt = Number(remote.lastModified || 0);
-      if (existing && Number(existing.remoteUpdatedAt || 0) >= updatedAt && existing.filePath) {
+      // Fileid may have been added on a re-pull for entries we already
+      // knew about — always refresh it since downstream description
+      // rewriting depends on it.
+      const remoteFileid = remote && remote.extendedData && remote.extendedData.fileid;
+      if (existing && Number(existing.remoteUpdatedAt || 0) >= updatedAt && existing.filePath && existing.fileid != null) {
         // Already up to date; keep the metadata as-is.
         knownById.delete(remote.id);
         continue;
       }
 
       try {
-        const download = await client.downloadAttachment(board.remoteId, list.remoteId, card.remoteId, remote.id);
+        const download = await client.downloadAttachment(card.remoteId, remote.id);
         if (!download || !download.data) continue;
         const filename = sanitizeFilename(remote.data || remote.name || `attachment-${remote.id}`);
         const dir = joinPath(board.folderPath || "", "attachments", card.id);
@@ -4960,10 +5110,11 @@ class AttachmentSyncer {
 
         const entry = existing || {};
         entry.remoteId = remote.id;
+        entry.fileid = remoteFileid != null ? Number(remoteFileid) : (existing && existing.fileid) || null;
         entry.filePath = filePath;
         entry.filename = filename;
         entry.remoteUpdatedAt = updatedAt;
-        entry.contentType = download.contentType || "application/octet-stream";
+        entry.contentType = download.contentType || (remote.extendedData && remote.extendedData.mimetype) || "application/octet-stream";
         if (!existing) card.attachments.push(entry);
         knownById.delete(remote.id);
         downloaded += 1;
@@ -4988,41 +5139,79 @@ class AttachmentSyncer {
   }
 
   /**
-   * Upload any files in the card's attachments directory that don't yet have
-   * a `remoteId`. Called after a card push so the card definitely exists on
-   * Nextcloud.
+   * Upload any files referenced by the card that aren't yet on Nextcloud.
+   * Files are discovered from two sources so users have a single mental
+   * model regardless of how they added the image:
+   *
+   *   1) The per-card attachment folder `<boardFolder>/attachments/<cardId>/`
+   *      — used by insertImageFromFile for pasted/dropped screenshots.
+   *   2) `card.details` wikilinks (`![[<path>]]`) — a user might paste an
+   *      image at a specific location in the card body; without walking
+   *      the wikilinks we'd miss it.
+   *
+   * Files already present in `card.attachments[]` (matched by filePath)
+   * are skipped so a re-sync doesn't spam the server with duplicates.
+   *
+   * NOTE: `list` argument is no longer used; keep it in the signature so
+   * every existing call site (`await this.attachments.pushCard(client,
+   * card, board, list)`) stays valid without an audit sweep.
    */
-  async pushCard(client, card, board, list) {
+  async pushCard(client, card, board /* , list */) {
     if (!this.isEnabled()) return { uploaded: 0 };
-    if (card.remoteId == null || board.remoteId == null || list.remoteId == null) return { uploaded: 0 };
+    if (card.remoteId == null || board.remoteId == null) return { uploaded: 0 };
+    if (!Array.isArray(card.attachments)) card.attachments = [];
 
+    const knownByPath = new Map(card.attachments.filter((e) => e.filePath).map((entry) => [entry.filePath, entry]));
+
+    // Collect candidate local files:
+    //   (a) direct children of <boardFolder>/attachments/<cardId>/
+    //   (b) files referenced via `![[…]]` in the card description
+    const candidatePaths = new Set();
     const dir = joinPath(board.folderPath || "", "attachments", card.id);
     const dirRef = this.plugin.app.vault.getAbstractFileByPath(dir);
-    if (!dirRef || !dirRef.children) return { uploaded: 0 };
-
-    if (!Array.isArray(card.attachments)) card.attachments = [];
-    const knownByPath = new Map(card.attachments.filter((e) => e.filePath).map((entry) => [entry.filePath, entry]));
+    if (dirRef && dirRef.children) {
+      for (const child of dirRef.children) {
+        if (!child || child.children) continue; // skip nested directories
+        candidatePaths.add(child.path);
+      }
+    }
+    const details = typeof card.details === "string" ? card.details : "";
+    for (const match of details.matchAll(/!?\[\[([^\]\n]+)\]\]/g)) {
+      const target = match[1].split("|")[0].trim();
+      if (!target) continue;
+      // Skip absolute URLs — external images, not vault files.
+      if (/^https?:\/\//i.test(target)) continue;
+      candidatePaths.add(target);
+    }
 
     let uploaded = 0;
     const debug = (payload) => this.plugin.debugLog(Object.assign({ scope: "attachments" }, payload));
-    debug({ event: "push.scan", cardId: card.id, dir, children: dirRef.children.length });
-    for (const child of dirRef.children) {
-      if (!child || child.children) continue; // skip nested directories
-      if (knownByPath.has(child.path)) { debug({ event: "push.skip-tracked", path: child.path }); continue; }
+    debug({ event: "push.scan", cardId: card.id, dir, candidates: candidatePaths.size });
+
+    for (const path of candidatePaths) {
+      if (knownByPath.has(path)) { debug({ event: "push.skip-tracked", path }); continue; }
+      const file = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (!file || file.children !== undefined) { // not a file (folder or missing)
+        debug({ event: "push.skip-missing", path });
+        continue;
+      }
       try {
-        const data = await this.plugin.app.vault.readBinary(child);
-        const filename = sanitizeFilename(child.name);
-        debug({ event: "push.upload.request", path: child.path, filename, bytes: data.byteLength || 0 });
-        const { data: response } = await client.uploadAttachment(board.remoteId, list.remoteId, card.remoteId, {
+        const data = await this.plugin.app.vault.readBinary(file);
+        const filename = sanitizeFilename(file.name);
+        debug({ event: "push.upload.request", path, filename, bytes: data.byteLength || 0 });
+        const { data: response } = await client.uploadAttachment(card.remoteId, board.remoteId, {
           data: new Uint8Array(data),
           filename,
           mimeType: guessMime(filename),
         });
-        debug({ event: "push.upload.response", path: child.path, responseId: response && response.id, responseKeys: response ? Object.keys(response) : null });
+        debug({
+          event: "push.upload.response",
+          path,
+          responseId: response && response.id,
+          fileid: response && response.extendedData && response.extendedData.fileid,
+          responseKeys: response ? Object.keys(response) : null,
+        });
         if (!response || response.id == null) {
-          // Log this specifically — the older singular-endpoint bug made
-          // the response empty even though the file uploaded, which we
-          // want to be able to identify at a glance in diagnostics.
           this.plugin.pushSyncLog({
             event: "attachment-upload-empty-response",
             cardId: card.id,
@@ -5030,9 +5219,11 @@ class AttachmentSyncer {
           });
           continue;
         }
+        const fileid = response.extendedData && response.extendedData.fileid;
         card.attachments.push({
           remoteId: response.id,
-          filePath: child.path,
+          fileid: fileid != null ? Number(fileid) : null,
+          filePath: path,
           filename,
           remoteUpdatedAt: Number(response.lastModified || Date.now()),
           contentType: guessMime(filename),
@@ -5042,7 +5233,7 @@ class AttachmentSyncer {
         this.plugin.pushSyncLog({
           event: "attachment-upload-failed",
           cardId: card.id,
-          filename: child.name,
+          filename: file.name,
           status: error && error.status,
           message: (error && error.message) || String(error),
         });
@@ -5063,7 +5254,7 @@ class AttachmentSyncer {
     let removed = 0;
     for (const entry of nc.pendingAttachmentDeletions) {
       try {
-        await client.deleteAttachment(entry.boardRemoteId, entry.stackRemoteId, entry.cardRemoteId, entry.attachmentRemoteId);
+        await client.deleteAttachment(entry.cardRemoteId, entry.boardRemoteId, entry.attachmentRemoteId);
         removed += 1;
       } catch (error) {
         // See sync-manager.reapDeletions: 403/404/410 all mean "the server
@@ -5149,6 +5340,8 @@ const {
   localCardToDeckPatch,
   localCardToDeckCreate,
   remoteCardToLocal,
+  localDescriptionToDeck,
+  deckDescriptionToLocal,
 } = __require("src/sync-mapper.js");
 const { DeckApiError } = __require("src/deck-client.js");
 const { detectFieldConflicts, applyPolicy, snapshotBaseline } = __require("src/conflict.js");
@@ -5370,11 +5563,29 @@ class SyncManager {
           title: merged.title,
         });
 
-        // Fetch attachments for the card (only if feature-enabled).
+        // Fetch attachments for the card (only if feature-enabled). Must
+        // run BEFORE the description rewrite below so `merged.attachments`
+        // is populated with the fresh `fileid` values we need to resolve
+        // Deck's `[caption](server/f/<id> (preview))` links back into
+        // Obsidian wikilink form.
         try {
           await this.attachments.pullCard(client, merged, localBoard, localList);
         } catch (error) {
           this.plugin.pushSyncLog({ event: "attachment-pull-failed", cardId, message: (error && error.message) || String(error) });
+        }
+
+        // Now that attachments are known, translate any Deck-style
+        // attachment preview links back into Obsidian's `![[…]]` embed
+        // syntax so the local markdown renders inline. Non-matching links
+        // (external URLs, references to other Nextcloud instances) are
+        // preserved untouched — see deckDescriptionToLocal.
+        const serverUrl = this.plugin.data.nextcloud && this.plugin.data.nextcloud.serverUrl;
+        if (serverUrl && typeof merged.details === "string") {
+          const converted = deckDescriptionToLocal(merged.details, merged, { serverUrl });
+          if (converted !== merged.details) {
+            merged.details = converted;
+            this.plugin.debugLog({ event: "sync.pull.attachment-links-rewritten", cardId });
+          }
         }
       }
     }
@@ -5472,17 +5683,26 @@ class SyncManager {
       this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
     });
 
-    // NOTE: previous versions of this method followed up with a second
-    // updateCard call that rewrote description-embedded Obsidian wikilinks
-    // (`![[…]]`) into either a Deck attachment URL or the bare filename.
-    // That rewrite is what caused the "云端 description 里图片位置变成
-    // 图片名字" symptom. Deck's Markdown renderer is a plain CommonMark
-    // parser and doesn't know about `![[…]]` syntax, but at worst it will
-    // display the raw text — which is strictly better than us mangling
-    // the user's content on their behalf. So we now leave description
-    // exactly as the user typed it. Attachment reconciliation happens
-    // through the dedicated attachment endpoints, not through description
-    // text substitution. (See plan: attachment-rework-plan.md.)
+    // After attachments upload we may now be able to translate any
+    // `![[…]]` embeds in the description into Deck's inline preview
+    // link syntax (`[caption](server/f/<id> (preview))`). This is the
+    // safe form of the description rewrite that pre.10–pre.14 got
+    // wrong: it only replaces wikilinks whose target resolves to a
+    // freshly uploaded attachment (matched by filePath / basename and
+    // fileid), and it never touches the local card — only the payload
+    // going to Deck. Unresolvable wikilinks are left alone verbatim
+    // rather than mangled into filename captions.
+    const serverUrl = this.plugin.data.nextcloud && this.plugin.data.nextcloud.serverUrl;
+    const rewritten = serverUrl ? localDescriptionToDeck(payload.description || "", card, { serverUrl }) : payload.description;
+    if (rewritten && rewritten !== payload.description) {
+      try {
+        const { data: updated } = await client.updateCard(remoteBoard(localBoard), list.remoteId, card.remoteId, Object.assign({}, payload, { description: rewritten }));
+        if (updated) this.applyRemoteToCard(card, updated, localBoard.id, list.id);
+        this.plugin.debugLog({ event: "sync.push.create.attachment-links-rewritten", cardId: card.id });
+      } catch (error) {
+        this.plugin.pushSyncLog({ event: "attachment-link-rewrite-failed", cardId: card.id, message: (error && error.message) || String(error) });
+      }
+    }
   }
 
   async pushUpdate(client, localBoard, list, card, remoteSnapshot, policy) {
@@ -5532,10 +5752,14 @@ class SyncManager {
     });
 
     const payload = localCardToDeckPatch(card, { owner: this.plugin.data.nextcloud.username });
-    // NOTE: no more wikilink rewrite. Description is shipped exactly as
-    // the user typed it — Deck may display `![[…]]` as raw text but at
-    // least we're not silently editing user content. See pushCreate for
-    // the full rationale.
+    // Safe wikilink rewrite: only substitute `![[…]]` embeds whose target
+    // resolves to an attachment we just uploaded (see localDescriptionToDeck).
+    // Unresolvable wikilinks and external URLs are left verbatim so we can't
+    // silently mangle user content the way pre.10–pre.14 did.
+    const serverUrl = this.plugin.data.nextcloud && this.plugin.data.nextcloud.serverUrl;
+    if (serverUrl) {
+      payload.description = localDescriptionToDeck(payload.description || "", card, { serverUrl });
+    }
     const board = remoteBoard(localBoard);
     this.plugin.debugLog({
       event: "sync.push.update.request",

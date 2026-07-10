@@ -5,6 +5,8 @@ const {
   localCardToDeckPatch,
   localCardToDeckCreate,
   remoteCardToLocal,
+  localDescriptionToDeck,
+  deckDescriptionToLocal,
 } = require("./sync-mapper");
 const { DeckApiError } = require("./deck-client");
 const { detectFieldConflicts, applyPolicy, snapshotBaseline } = require("./conflict");
@@ -226,11 +228,29 @@ class SyncManager {
           title: merged.title,
         });
 
-        // Fetch attachments for the card (only if feature-enabled).
+        // Fetch attachments for the card (only if feature-enabled). Must
+        // run BEFORE the description rewrite below so `merged.attachments`
+        // is populated with the fresh `fileid` values we need to resolve
+        // Deck's `[caption](server/f/<id> (preview))` links back into
+        // Obsidian wikilink form.
         try {
           await this.attachments.pullCard(client, merged, localBoard, localList);
         } catch (error) {
           this.plugin.pushSyncLog({ event: "attachment-pull-failed", cardId, message: (error && error.message) || String(error) });
+        }
+
+        // Now that attachments are known, translate any Deck-style
+        // attachment preview links back into Obsidian's `![[…]]` embed
+        // syntax so the local markdown renders inline. Non-matching links
+        // (external URLs, references to other Nextcloud instances) are
+        // preserved untouched — see deckDescriptionToLocal.
+        const serverUrl = this.plugin.data.nextcloud && this.plugin.data.nextcloud.serverUrl;
+        if (serverUrl && typeof merged.details === "string") {
+          const converted = deckDescriptionToLocal(merged.details, merged, { serverUrl });
+          if (converted !== merged.details) {
+            merged.details = converted;
+            this.plugin.debugLog({ event: "sync.pull.attachment-links-rewritten", cardId });
+          }
         }
       }
     }
@@ -328,17 +348,26 @@ class SyncManager {
       this.plugin.pushSyncLog({ event: "labels-push-failed", cardId: card.id, message: (error && error.message) || String(error) });
     });
 
-    // NOTE: previous versions of this method followed up with a second
-    // updateCard call that rewrote description-embedded Obsidian wikilinks
-    // (`![[…]]`) into either a Deck attachment URL or the bare filename.
-    // That rewrite is what caused the "云端 description 里图片位置变成
-    // 图片名字" symptom. Deck's Markdown renderer is a plain CommonMark
-    // parser and doesn't know about `![[…]]` syntax, but at worst it will
-    // display the raw text — which is strictly better than us mangling
-    // the user's content on their behalf. So we now leave description
-    // exactly as the user typed it. Attachment reconciliation happens
-    // through the dedicated attachment endpoints, not through description
-    // text substitution. (See plan: attachment-rework-plan.md.)
+    // After attachments upload we may now be able to translate any
+    // `![[…]]` embeds in the description into Deck's inline preview
+    // link syntax (`[caption](server/f/<id> (preview))`). This is the
+    // safe form of the description rewrite that pre.10–pre.14 got
+    // wrong: it only replaces wikilinks whose target resolves to a
+    // freshly uploaded attachment (matched by filePath / basename and
+    // fileid), and it never touches the local card — only the payload
+    // going to Deck. Unresolvable wikilinks are left alone verbatim
+    // rather than mangled into filename captions.
+    const serverUrl = this.plugin.data.nextcloud && this.plugin.data.nextcloud.serverUrl;
+    const rewritten = serverUrl ? localDescriptionToDeck(payload.description || "", card, { serverUrl }) : payload.description;
+    if (rewritten && rewritten !== payload.description) {
+      try {
+        const { data: updated } = await client.updateCard(remoteBoard(localBoard), list.remoteId, card.remoteId, Object.assign({}, payload, { description: rewritten }));
+        if (updated) this.applyRemoteToCard(card, updated, localBoard.id, list.id);
+        this.plugin.debugLog({ event: "sync.push.create.attachment-links-rewritten", cardId: card.id });
+      } catch (error) {
+        this.plugin.pushSyncLog({ event: "attachment-link-rewrite-failed", cardId: card.id, message: (error && error.message) || String(error) });
+      }
+    }
   }
 
   async pushUpdate(client, localBoard, list, card, remoteSnapshot, policy) {
@@ -388,10 +417,14 @@ class SyncManager {
     });
 
     const payload = localCardToDeckPatch(card, { owner: this.plugin.data.nextcloud.username });
-    // NOTE: no more wikilink rewrite. Description is shipped exactly as
-    // the user typed it — Deck may display `![[…]]` as raw text but at
-    // least we're not silently editing user content. See pushCreate for
-    // the full rationale.
+    // Safe wikilink rewrite: only substitute `![[…]]` embeds whose target
+    // resolves to an attachment we just uploaded (see localDescriptionToDeck).
+    // Unresolvable wikilinks and external URLs are left verbatim so we can't
+    // silently mangle user content the way pre.10–pre.14 did.
+    const serverUrl = this.plugin.data.nextcloud && this.plugin.data.nextcloud.serverUrl;
+    if (serverUrl) {
+      payload.description = localDescriptionToDeck(payload.description || "", card, { serverUrl });
+    }
     const board = remoteBoard(localBoard);
     this.plugin.debugLog({
       event: "sync.push.update.request",

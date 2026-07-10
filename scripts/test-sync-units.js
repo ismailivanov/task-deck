@@ -222,4 +222,69 @@ test("localCardToDeckPatch embeds checklist inside description", () => {
   assert.ok(patch.description.includes("- [x] b"));
 });
 
+// ---- Attachment link rewrite (image handling in card description) --------
+//
+// Local wikilinks must become Deck's `(preview)` markdown links on push
+// and revert on pull. External URLs and unresolved paths are left alone.
+
+const SERVER = "https://nc.example.com";
+const cardWithAttachments = {
+  attachments: [
+    { fileid: 5210, filename: "foo.png", filePath: "Deck/Welcome/attachments/card-1/foo.png" },
+    { fileid: 5211, filename: "bar.jpg", filePath: "Deck/Welcome/attachments/card-1/bar.jpg" },
+  ],
+};
+
+test("localDescriptionToDeck rewrites matching wikilink to preview link", () => {
+  const input = "before ![[Deck/Welcome/attachments/card-1/foo.png]] after";
+  const out = mapper.localDescriptionToDeck(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, `before [foo.png](${SERVER}/f/5210 (preview)) after`);
+});
+
+test("localDescriptionToDeck leaves external URLs untouched", () => {
+  const input = "hello ![[https://cdn.example.com/logo.png]] world";
+  const out = mapper.localDescriptionToDeck(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, input);
+});
+
+test("localDescriptionToDeck leaves unresolved wikilinks untouched", () => {
+  const input = "x ![[not-in-list.png]] y";
+  const out = mapper.localDescriptionToDeck(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, input);
+});
+
+test("localDescriptionToDeck matches by basename fallback", () => {
+  const input = "just ![[foo.png]] here";
+  const out = mapper.localDescriptionToDeck(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, `just [foo.png](${SERVER}/f/5210 (preview)) here`);
+});
+
+test("deckDescriptionToLocal rewrites matching preview link to wikilink", () => {
+  const input = `pre [foo.png](${SERVER}/f/5210 (preview)) post`;
+  const out = mapper.deckDescriptionToLocal(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, "pre ![[Deck/Welcome/attachments/card-1/foo.png]] post");
+});
+
+test("deckDescriptionToLocal leaves non-preview markdown links untouched", () => {
+  const input = `see [docs](${SERVER}/index.php/apps/wiki) for details`;
+  const out = mapper.deckDescriptionToLocal(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, input);
+});
+
+test("deckDescriptionToLocal ignores links pointing to a different server", () => {
+  const input = "keep [foo.png](https://other.host/f/5210 (preview))";
+  const out = mapper.deckDescriptionToLocal(input, cardWithAttachments, { serverUrl: SERVER });
+  assert.strictEqual(out, input);
+});
+
+test("push+pull round-trip preserves the source string", () => {
+  const original = "look ![[Deck/Welcome/attachments/card-1/foo.png]] here";
+  const roundtripped = mapper.deckDescriptionToLocal(
+    mapper.localDescriptionToDeck(original, cardWithAttachments, { serverUrl: SERVER }),
+    cardWithAttachments,
+    { serverUrl: SERVER },
+  );
+  assert.strictEqual(roundtripped, original);
+});
+
 console.log(`\n${passed} tests passed.`);

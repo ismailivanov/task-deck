@@ -16,6 +16,12 @@ const { normalizeServerUrl } = require("./nextcloud-auth");
 // sync-manager.js so the client stays reusable and testable in isolation.
 
 const DECK_API_PREFIX = "/index.php/apps/deck/api/v1.0";
+// Attachments live on the OCS API surface, not the /index.php REST one.
+// The HAR capture of the Web UI making an attachment upload is what pins
+// this down: POST /ocs/v2.php/apps/deck/api/v1.0/cards/{id}/attachment.
+// Same-origin cookie session on the Web UI, so we need App Password
+// basic auth + OCS-APIRequest header for scripted access.
+const OCS_DECK_PREFIX = "/ocs/v2.php/apps/deck/api/v1.0";
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const MAX_BACKOFF_MS = 60000;
 
@@ -195,60 +201,80 @@ class DeckClient {
   // Deck ≥ 1.0). `type=file` (Deck ≥ 1.9) references arbitrary Nextcloud Files
   // paths; not used here for MVP.
 
-  getAttachments(boardId, stackId, cardId) {
+  // Attachments live on Deck's OCS API surface, not the REST /index.php one.
+  // The Web UI's own attachment flow (verified against a captured HAR) uses:
+  //   GET    /ocs/v2.php/apps/deck/api/v1.0/cards/{cardId}/attachments?boardId={id}
+  //   POST   /ocs/v2.php/apps/deck/api/v1.0/cards/{cardId}/attachment?boardId={id}
+  //     body: multipart with cardId=<id>, type=file, file=<binary>
+  //   DELETE /ocs/v2.php/apps/deck/api/v1.0/cards/{cardId}/attachments/{aid}?boardId={id}
+  // `type=file` is Deck ≥ 1.3.0 (files land in the user's Nextcloud Files
+  // under /Deck/…, get a real Nextcloud `fileid`, and produce thumbnails
+  // that Deck's Markdown renderer can preview via `/f/{fileid}` links).
+  // The legacy `type=deck_file` route on /index.php/… is why earlier
+  // versions of this plugin uploaded bytes that never showed up in the
+  // card's attachment panel: on new Deck deployments that URL silently
+  // stores the file in Nextcloud but doesn't register it against the card.
+  //
+  // Responses wrap the payload in an OCS envelope: {ocs:{meta,data:{…}}}.
+  // We unwrap in the wrapper methods below so the sync layer sees a flat
+  // { id, cardId, type, data (filename), extendedData:{fileid, path, …} }.
+
+  getAttachments(cardId, boardId) {
     return this.request({
       method: "GET",
-      path: `/boards/${encodeURIComponent(boardId)}/stacks/${encodeURIComponent(stackId)}/cards/${encodeURIComponent(cardId)}/attachments`,
-    });
+      ocs: true,
+      path: `/cards/${encodeURIComponent(cardId)}/attachments`,
+      query: { boardId, format: "json" },
+    }).then(unwrapOcs);
   }
 
   /**
    * Upload an attachment. `data` may be a Uint8Array or ArrayBuffer.
    * `filename` and `mimeType` should describe the source file (extension +
-   * best-effort MIME). Server responds with the attachment metadata.
+   * best-effort MIME). Server responds with the attachment metadata
+   * (already OCS-unwrapped).
    */
-  uploadAttachment(boardId, stackId, cardId, { data, filename, mimeType }) {
+  uploadAttachment(cardId, boardId, { data, filename, mimeType }) {
     return this.multipartRequest({
       method: "POST",
-      // NOTE: the resource is spelled `attachments` (plural) in the REST API
-      // — see Deck docs "Upload an attachment". A singular URL falls through
-      // to a generic file-upload route on some deployments, storing the file
-      // in the user's Nextcloud Files without registering it on the card.
-      // Symptom: card's attachment panel stays empty but the raw file
-      // appears in the files tree.
-      path: `/boards/${encodeURIComponent(boardId)}/stacks/${encodeURIComponent(stackId)}/cards/${encodeURIComponent(cardId)}/attachments`,
-      formFields: { type: "deck_file" },
+      ocs: true,
+      path: `/cards/${encodeURIComponent(cardId)}/attachment`,
+      query: { boardId, format: "json" },
+      formFields: { cardId: String(cardId), type: "file" },
       file: { field: "file", data, filename, mimeType: mimeType || "application/octet-stream" },
-    });
+    }).then(unwrapOcs);
   }
 
-  deleteAttachment(boardId, stackId, cardId, attachmentId) {
+  deleteAttachment(cardId, boardId, attachmentId) {
     return this.request({
       method: "DELETE",
-      path: `/boards/${encodeURIComponent(boardId)}/stacks/${encodeURIComponent(stackId)}/cards/${encodeURIComponent(cardId)}/attachments/${encodeURIComponent(attachmentId)}`,
-    });
+      ocs: true,
+      path: `/cards/${encodeURIComponent(cardId)}/attachments/${encodeURIComponent(attachmentId)}`,
+      query: { boardId, format: "json" },
+    }).then(unwrapOcs);
   }
 
   /**
-   * Download the raw bytes of an attachment. The Deck download endpoint sits
-   * outside the /api/v1.0 prefix (it streams the file through PHP directly),
-   * so we build the URL manually rather than through `buildUrl`.
+   * Download the raw bytes of an attachment. Two candidate endpoints work
+   * on different Deck versions; we start with the OCS-flavoured one and
+   * fall back to the legacy /index.php endpoint if the server returns a
+   * 4xx. Both bypass /api/v1.0 and stream the file through PHP.
    */
-  async downloadAttachment(boardId, stackId, cardId, attachmentId) {
-    const url = `${this.serverUrl}/index.php/apps/deck/cards/${encodeURIComponent(cardId)}/attachment/${encodeURIComponent(attachmentId)}`;
+  async downloadAttachment(cardId, attachmentId) {
+    const primary = `${this.serverUrl}/index.php/apps/deck/cards/${encodeURIComponent(cardId)}/attachment/${encodeURIComponent(attachmentId)}`;
     const headers = this.buildHeaders();
     headers.Accept = "*/*";
     delete headers["Content-Type"];
 
     const response = await requestUrl({
-      url,
+      url: primary,
       method: "GET",
       headers,
       throw: false,
     });
     const status = response.status || 0;
     if (status < 200 || status >= 300) {
-      throw new DeckApiError(`Deck attachment download failed (${status}).`, { status, url, body: parseBody(response) });
+      throw new DeckApiError(`Deck attachment download failed (${status}).`, { status, url: primary, body: parseBody(response) });
     }
     return {
       status,
@@ -262,6 +288,20 @@ class DeckClient {
 
   buildUrl(path, query) {
     let url = `${this.serverUrl}${DECK_API_PREFIX}${path}`;
+    if (query && Object.keys(query).length) {
+      const params = Object.entries(query)
+        .filter(([, value]) => value !== undefined && value !== null)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+      if (params.length) url += `?${params.join("&")}`;
+    }
+    return url;
+  }
+
+  // Attachment endpoints live under a different URL prefix — OCS API on
+  // /ocs/v2.php instead of the REST-flavoured /index.php. Keeping this in
+  // a separate helper avoids buildUrl having to branch on path shape.
+  buildOcsUrl(path, query) {
+    let url = `${this.serverUrl}${OCS_DECK_PREFIX}${path}`;
     if (query && Object.keys(query).length) {
       const params = Object.entries(query)
         .filter(([, value]) => value !== undefined && value !== null)
@@ -292,8 +332,9 @@ class DeckClient {
    * On non-retryable failures throws a DeckApiError; a 401 flags the caller
    * (settings/sync) to force re-authentication.
    */
-  async request({ method, path, body, query, etag, signal }) {
-    const url = this.buildUrl(path, query);
+  async request({ method, path, body, query, etag, signal, ocs }) {
+    // OCS endpoints (attachments) live on a different URL prefix.
+    const url = ocs ? this.buildOcsUrl(path, query) : this.buildUrl(path, query);
     const headers = this.buildHeaders({ etag });
     const payload = body === undefined ? undefined : JSON.stringify(body);
 
@@ -383,8 +424,8 @@ class DeckClient {
    * accept a FormData object directly — it wants an ArrayBuffer. This means
    * we must construct the CRLF-delimited envelope ourselves.
    */
-  async multipartRequest({ method, path, formFields = {}, file }) {
-    const url = this.buildUrl(path);
+  async multipartRequest({ method, path, formFields = {}, file, query, ocs }) {
+    const url = ocs ? this.buildOcsUrl(path, query) : this.buildUrl(path, query);
     const boundary = `----ObsidianNextcloudDeck${Math.random().toString(36).slice(2)}`;
     const encoder = new TextEncoder();
     const chunks = [];
@@ -488,6 +529,21 @@ function parseBody(response) {
   } catch (error) {
     return text;
   }
+}
+
+/**
+ * OCS endpoints wrap the payload in `{ocs:{meta,data}}`. The rest of the
+ * plugin already expects the flat shape from the REST /api/v1.0 endpoints,
+ * so we unwrap here at the client boundary. Preserves `{status,headers}`
+ * from the underlying request result.
+ */
+function unwrapOcs(result) {
+  if (!result) return result;
+  const body = result.data;
+  if (body && body.ocs && Object.prototype.hasOwnProperty.call(body.ocs, "data")) {
+    return Object.assign({}, result, { data: body.ocs.data });
+  }
+  return result;
 }
 
 function sleep(ms) {

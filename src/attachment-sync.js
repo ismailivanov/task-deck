@@ -62,14 +62,18 @@ class AttachmentSyncer {
    * Pull all remote attachments for a card into the vault. Skips downloads
    * whose remote id + updatedAt already match a local entry to avoid
    * re-fetching unchanged files.
+   *
+   * NOTE: OCS attachment endpoints only need cardRemoteId + boardRemoteId;
+   * the `list` argument is no longer used but kept in the signature for
+   * call-site compatibility (all existing callers still pass it).
    */
-  async pullCard(client, card, board, list) {
+  async pullCard(client, card, board /* , list */) {
     if (!this.isEnabled()) return { downloaded: 0 };
-    if (card.remoteId == null || board.remoteId == null || list.remoteId == null) return { downloaded: 0 };
+    if (card.remoteId == null || board.remoteId == null) return { downloaded: 0 };
 
     let remoteAttachments = [];
     try {
-      const { data } = await client.getAttachments(board.remoteId, list.remoteId, card.remoteId);
+      const { data } = await client.getAttachments(card.remoteId, board.remoteId);
       remoteAttachments = Array.isArray(data) ? data : [];
     } catch (error) {
       this.plugin.pushSyncLog({ event: "attachments-list-failed", cardId: card.id, message: (error && error.message) || String(error) });
@@ -84,14 +88,18 @@ class AttachmentSyncer {
       if (!remote || remote.id == null) continue;
       const existing = knownById.get(remote.id);
       const updatedAt = Number(remote.lastModified || 0);
-      if (existing && Number(existing.remoteUpdatedAt || 0) >= updatedAt && existing.filePath) {
+      // Fileid may have been added on a re-pull for entries we already
+      // knew about — always refresh it since downstream description
+      // rewriting depends on it.
+      const remoteFileid = remote && remote.extendedData && remote.extendedData.fileid;
+      if (existing && Number(existing.remoteUpdatedAt || 0) >= updatedAt && existing.filePath && existing.fileid != null) {
         // Already up to date; keep the metadata as-is.
         knownById.delete(remote.id);
         continue;
       }
 
       try {
-        const download = await client.downloadAttachment(board.remoteId, list.remoteId, card.remoteId, remote.id);
+        const download = await client.downloadAttachment(card.remoteId, remote.id);
         if (!download || !download.data) continue;
         const filename = sanitizeFilename(remote.data || remote.name || `attachment-${remote.id}`);
         const dir = joinPath(board.folderPath || "", "attachments", card.id);
@@ -101,10 +109,11 @@ class AttachmentSyncer {
 
         const entry = existing || {};
         entry.remoteId = remote.id;
+        entry.fileid = remoteFileid != null ? Number(remoteFileid) : (existing && existing.fileid) || null;
         entry.filePath = filePath;
         entry.filename = filename;
         entry.remoteUpdatedAt = updatedAt;
-        entry.contentType = download.contentType || "application/octet-stream";
+        entry.contentType = download.contentType || (remote.extendedData && remote.extendedData.mimetype) || "application/octet-stream";
         if (!existing) card.attachments.push(entry);
         knownById.delete(remote.id);
         downloaded += 1;
@@ -129,41 +138,79 @@ class AttachmentSyncer {
   }
 
   /**
-   * Upload any files in the card's attachments directory that don't yet have
-   * a `remoteId`. Called after a card push so the card definitely exists on
-   * Nextcloud.
+   * Upload any files referenced by the card that aren't yet on Nextcloud.
+   * Files are discovered from two sources so users have a single mental
+   * model regardless of how they added the image:
+   *
+   *   1) The per-card attachment folder `<boardFolder>/attachments/<cardId>/`
+   *      — used by insertImageFromFile for pasted/dropped screenshots.
+   *   2) `card.details` wikilinks (`![[<path>]]`) — a user might paste an
+   *      image at a specific location in the card body; without walking
+   *      the wikilinks we'd miss it.
+   *
+   * Files already present in `card.attachments[]` (matched by filePath)
+   * are skipped so a re-sync doesn't spam the server with duplicates.
+   *
+   * NOTE: `list` argument is no longer used; keep it in the signature so
+   * every existing call site (`await this.attachments.pushCard(client,
+   * card, board, list)`) stays valid without an audit sweep.
    */
-  async pushCard(client, card, board, list) {
+  async pushCard(client, card, board /* , list */) {
     if (!this.isEnabled()) return { uploaded: 0 };
-    if (card.remoteId == null || board.remoteId == null || list.remoteId == null) return { uploaded: 0 };
+    if (card.remoteId == null || board.remoteId == null) return { uploaded: 0 };
+    if (!Array.isArray(card.attachments)) card.attachments = [];
 
+    const knownByPath = new Map(card.attachments.filter((e) => e.filePath).map((entry) => [entry.filePath, entry]));
+
+    // Collect candidate local files:
+    //   (a) direct children of <boardFolder>/attachments/<cardId>/
+    //   (b) files referenced via `![[…]]` in the card description
+    const candidatePaths = new Set();
     const dir = joinPath(board.folderPath || "", "attachments", card.id);
     const dirRef = this.plugin.app.vault.getAbstractFileByPath(dir);
-    if (!dirRef || !dirRef.children) return { uploaded: 0 };
-
-    if (!Array.isArray(card.attachments)) card.attachments = [];
-    const knownByPath = new Map(card.attachments.filter((e) => e.filePath).map((entry) => [entry.filePath, entry]));
+    if (dirRef && dirRef.children) {
+      for (const child of dirRef.children) {
+        if (!child || child.children) continue; // skip nested directories
+        candidatePaths.add(child.path);
+      }
+    }
+    const details = typeof card.details === "string" ? card.details : "";
+    for (const match of details.matchAll(/!?\[\[([^\]\n]+)\]\]/g)) {
+      const target = match[1].split("|")[0].trim();
+      if (!target) continue;
+      // Skip absolute URLs — external images, not vault files.
+      if (/^https?:\/\//i.test(target)) continue;
+      candidatePaths.add(target);
+    }
 
     let uploaded = 0;
     const debug = (payload) => this.plugin.debugLog(Object.assign({ scope: "attachments" }, payload));
-    debug({ event: "push.scan", cardId: card.id, dir, children: dirRef.children.length });
-    for (const child of dirRef.children) {
-      if (!child || child.children) continue; // skip nested directories
-      if (knownByPath.has(child.path)) { debug({ event: "push.skip-tracked", path: child.path }); continue; }
+    debug({ event: "push.scan", cardId: card.id, dir, candidates: candidatePaths.size });
+
+    for (const path of candidatePaths) {
+      if (knownByPath.has(path)) { debug({ event: "push.skip-tracked", path }); continue; }
+      const file = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (!file || file.children !== undefined) { // not a file (folder or missing)
+        debug({ event: "push.skip-missing", path });
+        continue;
+      }
       try {
-        const data = await this.plugin.app.vault.readBinary(child);
-        const filename = sanitizeFilename(child.name);
-        debug({ event: "push.upload.request", path: child.path, filename, bytes: data.byteLength || 0 });
-        const { data: response } = await client.uploadAttachment(board.remoteId, list.remoteId, card.remoteId, {
+        const data = await this.plugin.app.vault.readBinary(file);
+        const filename = sanitizeFilename(file.name);
+        debug({ event: "push.upload.request", path, filename, bytes: data.byteLength || 0 });
+        const { data: response } = await client.uploadAttachment(card.remoteId, board.remoteId, {
           data: new Uint8Array(data),
           filename,
           mimeType: guessMime(filename),
         });
-        debug({ event: "push.upload.response", path: child.path, responseId: response && response.id, responseKeys: response ? Object.keys(response) : null });
+        debug({
+          event: "push.upload.response",
+          path,
+          responseId: response && response.id,
+          fileid: response && response.extendedData && response.extendedData.fileid,
+          responseKeys: response ? Object.keys(response) : null,
+        });
         if (!response || response.id == null) {
-          // Log this specifically — the older singular-endpoint bug made
-          // the response empty even though the file uploaded, which we
-          // want to be able to identify at a glance in diagnostics.
           this.plugin.pushSyncLog({
             event: "attachment-upload-empty-response",
             cardId: card.id,
@@ -171,9 +218,11 @@ class AttachmentSyncer {
           });
           continue;
         }
+        const fileid = response.extendedData && response.extendedData.fileid;
         card.attachments.push({
           remoteId: response.id,
-          filePath: child.path,
+          fileid: fileid != null ? Number(fileid) : null,
+          filePath: path,
           filename,
           remoteUpdatedAt: Number(response.lastModified || Date.now()),
           contentType: guessMime(filename),
@@ -183,7 +232,7 @@ class AttachmentSyncer {
         this.plugin.pushSyncLog({
           event: "attachment-upload-failed",
           cardId: card.id,
-          filename: child.name,
+          filename: file.name,
           status: error && error.status,
           message: (error && error.message) || String(error),
         });
@@ -204,7 +253,7 @@ class AttachmentSyncer {
     let removed = 0;
     for (const entry of nc.pendingAttachmentDeletions) {
       try {
-        await client.deleteAttachment(entry.boardRemoteId, entry.stackRemoteId, entry.cardRemoteId, entry.attachmentRemoteId);
+        await client.deleteAttachment(entry.cardRemoteId, entry.boardRemoteId, entry.attachmentRemoteId);
         removed += 1;
       } catch (error) {
         // See sync-manager.reapDeletions: 403/404/410 all mean "the server

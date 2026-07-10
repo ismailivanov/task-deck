@@ -1313,10 +1313,15 @@ class CardModal extends Modal {
         && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
       const fileName = safeImageFileName(realName ? rawName : `Pasted image ${imageStamp()}.${ext}`, ext);
       const sourcePath = (this.card && this.card.filePath) || "";
-      // Card media lives in <board>/attachments so the board folder stays tidy.
+      // Card media lives in <board>/attachments/<cardId>/ so that
+      // attachment-sync can scan a card-scoped directory rather than
+      // fishing through a flat, board-shared folder. Also keeps
+      // per-card attachments tidy on rename/delete.
       const board = this.plugin.findBoardForCard(this.card);
       let targetPath;
-      if (board && board.folderPath) {
+      if (board && board.folderPath && this.card && this.card.id) {
+        targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${this.card.id}/${fileName}`);
+      } else if (board && board.folderPath) {
         targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${fileName}`);
       } else {
         const fm = this.app.fileManager;

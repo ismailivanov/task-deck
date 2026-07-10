@@ -292,6 +292,85 @@ function isRemoteTracked(card) {
   return !!(card && card.remoteId != null);
 }
 
+/**
+ * Translate a card description from Obsidian's `![[…]]` embed syntax into
+ * the shape Deck's Markdown renderer actually understands: an inline
+ * `[caption](https://<server>/f/<fileid> (preview))` markdown link. Deck's
+ * renderer specifically looks for the trailing `(preview)` title to swap
+ * the link for a thumbnail image.
+ *
+ * Matches are resolved by looking up the wikilink target in
+ * `card.attachments[]` (compared by both filePath and basename to be
+ * tolerant of authoring quirks) and using its `fileid` from
+ * `extendedData.fileid`. Anything we can't resolve — outbound URLs,
+ * references to unsynced files — is left untouched. Never mutate user
+ * content on ambiguous matches; a wrong replacement is worse than an
+ * unresolved wikilink.
+ */
+function localDescriptionToDeck(description, card, { serverUrl } = {}) {
+  if (typeof description !== "string" || !description) return description;
+  if (!card || !Array.isArray(card.attachments) || !card.attachments.length) return description;
+  if (!serverUrl) return description;
+  const server = String(serverUrl).replace(/\/+$/, "");
+  const byPath = new Map();
+  const byBase = new Map();
+  for (const att of card.attachments) {
+    if (!att || att.fileid == null) continue;
+    if (att.filePath) byPath.set(att.filePath, att);
+    if (att.filename) {
+      const key = String(att.filename).toLowerCase();
+      // Only remember the first match on basename — multiple attachments
+      // sharing a filename should be resolved by full path anyway.
+      if (!byBase.has(key)) byBase.set(key, att);
+    }
+  }
+  return description.replace(/(!?)\[\[([^\]\n]+)\]\]/g, (raw, bang, inner) => {
+    const parts = String(inner).split("|");
+    const target = parts[0].trim();
+    if (!target) return raw;
+    // Skip absolute URLs — those are external images, not Deck attachments.
+    if (/^https?:\/\//i.test(target)) return raw;
+    const alias = (parts[1] || "").trim();
+    const att = byPath.get(target) || byBase.get(target.split("/").pop().toLowerCase());
+    if (!att) return raw;
+    const caption = alias || att.filename || target.split("/").pop();
+    return `[${caption}](${server}/f/${att.fileid} (preview))`;
+  });
+}
+
+/**
+ * Inverse of localDescriptionToDeck: turn Deck's inline attachment links
+ * back into Obsidian wikilinks so the Markdown renders inline in Obsidian.
+ * Recognises exactly the shape Deck writes — `[caption](server/f/<id>
+ * (preview))` — and looks the `fileid` up in `card.attachments[]` to get
+ * the vault-relative path. Non-matching links are preserved verbatim.
+ */
+function deckDescriptionToLocal(description, card, { serverUrl } = {}) {
+  if (typeof description !== "string" || !description) return description;
+  if (!card || !Array.isArray(card.attachments) || !card.attachments.length) return description;
+  if (!serverUrl) return description;
+  const server = String(serverUrl).replace(/\/+$/, "");
+  const byFileId = new Map();
+  for (const att of card.attachments) {
+    if (att && att.fileid != null && att.filePath) byFileId.set(Number(att.fileid), att);
+  }
+  if (!byFileId.size) return description;
+  // Pattern: [caption](<url> (preview)) — Deck may or may not include the
+  // leading `!`; we accept either. Server prefix must match exactly to
+  // avoid mistakenly rewriting a link to a different Nextcloud instance.
+  const re = /!?\[([^\]\n]*)\]\((\S+?)\s*\(preview\)\)/g;
+  return description.replace(re, (raw, caption, url) => {
+    const trimmed = url.trim();
+    if (!trimmed.startsWith(`${server}/f/`)) return raw;
+    const fileidStr = trimmed.slice(`${server}/f/`.length).replace(/[/?#].*$/, "");
+    const fileid = Number(fileidStr);
+    if (!Number.isFinite(fileid)) return raw;
+    const att = byFileId.get(fileid);
+    if (!att) return raw;
+    return `![[${att.filePath}]]`;
+  });
+}
+
 module.exports = {
   decodeDeckColor,
   decodeDeckDate,
@@ -304,5 +383,7 @@ module.exports = {
   remoteBoardToLocal,
   reconcileBoardStructure,
   remoteLabelsToLocal,
+  localDescriptionToDeck,
+  deckDescriptionToLocal,
   isRemoteTracked,
 };
