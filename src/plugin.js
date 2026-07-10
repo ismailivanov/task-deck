@@ -156,6 +156,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.reconciling = true;
     try {
       const restored = await this.restoreBoardsFromIndexFiles();
+      // A Sync Deck vault switch trashes the PREVIOUS vault's board folders, but
+      // our per-device data.json still lists those boards. Drop any whose folder
+      // is gone from disk BEFORE the writes below — otherwise writeBoardIndexFiles
+      // re-creates their folders + indexes in the vault we just switched into, so
+      // every switch bled the old vault's Task Deck folders into the new one and
+      // the user had to delete them by hand. (adopt just above re-added the boards
+      // that DO have a folder here, so this only removes truly-vanished ones.)
+      const prunedVanished = this.pruneVanishedBoards();
       const removedIndexCards = this.removeBoardIndexCards();
       this.data.activeBoardId = this.findBoard(this.data.activeBoardId)
         ? this.data.activeBoardId
@@ -177,7 +185,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       await this.writeBoardIndexFiles();
       await this.syncGraphColorGroups();
       this.updateExplorerColors();
-      if (restored || renamed || deduped || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
+      if (restored || prunedVanished || renamed || deduped || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
     } finally {
       this.reconciling = false;
     }
@@ -773,11 +781,18 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.cardFolderSyncTimer = window.setTimeout(async () => {
       const deletes = this.pendingCardDeletes || [];
       this.pendingCardDeletes = [];
+      let changed = false;
       for (const deleted of deletes) {
-        if (await this.syncDeletedBoardFolder(deleted)) continue; // whole board folder gone
-        if (await this.syncDeletedBoardIndex(deleted)) continue;  // board's index gone -> board deleted elsewhere
-        await this.syncDeletedCardFile(deleted);
+        if (this.removeDeletedBoardFolder(deleted)) { changed = true; continue; } // whole board folder gone
+        if (this.removeDeletedBoardIndex(deleted)) { changed = true; continue; }  // board's index gone -> deleted elsewhere
+        if (this.removeDeletedCardFile(deleted)) changed = true;
       }
+      // Persist ONCE, after every deleted board/card is pruned. Saving per item
+      // ran writeBoardIndexFiles mid-loop, which re-created (via ensureBoardFolder)
+      // the folder of a board still queued for deletion — so a vault switch that
+      // trashes several board folders at once bled the old vault's Task Deck
+      // folders into the new one (the user had to delete them by hand).
+      if (changed) await this.savePluginData();
       await this.syncCardsFromFolder();
       this.refreshViews();
     }, 250);
@@ -808,6 +823,15 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return true;
   }
 
+  // Drop boards whose folder no longer exists on disk — they belong to a Sync
+  // Deck vault we've switched away from. Safe because createBoard writes a board's
+  // folder BEFORE its first save, so a board with no folder on disk was removed
+  // externally (a switch, or a delete on another device), never a pending new one.
+  pruneVanishedBoards() {
+    return this.pruneBoardsMatching((board) =>
+      !!board.folderPath && !this.app.vault.getAbstractFileByPath(board.folderPath));
+  }
+
   removeDeletedBoardFolder(deletedFile) {
     const deletedPath = deletedFile && deletedFile.path;
     if (!deletedPath) return false;
@@ -835,19 +859,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return this.pruneBoardsMatching((board) => this.boardIndexPath(board) === deletedPath);
   }
 
-  async syncDeletedBoardFolder(file) {
-    if (!this.removeDeletedBoardFolder(file)) return false;
-    await this.savePluginData();
-    return true;
-  }
-
-  async syncDeletedBoardIndex(file) {
-    if (!this.removeDeletedBoardIndex(file)) return false;
-    await this.savePluginData();
-    return true;
-  }
-
-  async syncDeletedCardFile(file) {
+  // In-memory only (no save) so a burst of deletes can be pruned together and
+  // persisted ONCE — see the delete loop in queueCardFolderSync.
+  removeDeletedCardFile(file) {
     const deletedPath = file && file.path;
     if (!deletedPath) return false;
     const card = Object.values(this.data.cards).find((item) => item.filePath === deletedPath);
@@ -860,7 +874,6 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       });
     }
     delete this.data.cards[card.id];
-    await this.savePluginData();
     return true;
   }
 
