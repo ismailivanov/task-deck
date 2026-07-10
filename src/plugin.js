@@ -774,20 +774,21 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       const deletes = this.pendingCardDeletes || [];
       this.pendingCardDeletes = [];
       for (const deleted of deletes) {
-        const removedBoard = await this.syncDeletedBoardFolder(deleted);
-        if (!removedBoard) await this.syncDeletedCardFile(deleted);
+        if (await this.syncDeletedBoardFolder(deleted)) continue; // whole board folder gone
+        if (await this.syncDeletedBoardIndex(deleted)) continue;  // board's index gone -> board deleted elsewhere
+        await this.syncDeletedCardFile(deleted);
       }
       await this.syncCardsFromFolder();
       this.refreshViews();
     }, 250);
   }
 
-  removeDeletedBoardFolder(deletedFile) {
-    const deletedPath = deletedFile && deletedFile.path;
-    if (!deletedPath) return false;
+  // Drop every board matching `predicate` and orphan-clean their cards. Returns
+  // true if anything was removed.
+  pruneBoardsMatching(predicate) {
     const removedBoardIds = new Set();
     this.data.boards = this.data.boards.filter((board) => {
-      if (board.folderPath !== deletedPath) return true;
+      if (!predicate(board)) return true;
       removedBoardIds.add(board.id);
       return false;
     });
@@ -807,8 +808,41 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return true;
   }
 
+  removeDeletedBoardFolder(deletedFile) {
+    const deletedPath = deletedFile && deletedFile.path;
+    if (!deletedPath) return false;
+    return this.pruneBoardsMatching((board) => board.folderPath === deletedPath);
+  }
+
+  // When a board's generated INDEX file is deleted, the board is gone — drop it.
+  // This is the symmetric counterpart to restoreBoardsFromIndexFiles (adopt on an
+  // index appearing): without it, a board deleted on one device is re-created here
+  // from our own data.json and its index re-uploaded, resurrecting it for everyone
+  // (Sync Deck delivers the deletion as an index-file delete, not a folder delete
+  // — the emptied folder may not even be removed yet).
+  //
+  // Keyed ONLY on the CURRENT boardIndexPath — deliberately NOT the legacy path.
+  // A board's live index is always the current path (writeBoardIndexFile writes it
+  // there and cleanupBoardIndexFiles trashes the legacy `Task Deck Board.md`
+  // during an unguarded save); matching the legacy path here would let that
+  // self-generated cleanup delete prune a live board. A genuine deletion still
+  // trashes the current index (and the folder, caught by removeDeletedBoardFolder),
+  // so no real deletion is missed. A rename's stale-index cleanup is at the old
+  // path, and a user's own UI delete already removed the board — neither matches.
+  removeDeletedBoardIndex(deletedFile) {
+    const deletedPath = deletedFile && deletedFile.path;
+    if (!deletedPath) return false;
+    return this.pruneBoardsMatching((board) => this.boardIndexPath(board) === deletedPath);
+  }
+
   async syncDeletedBoardFolder(file) {
     if (!this.removeDeletedBoardFolder(file)) return false;
+    await this.savePluginData();
+    return true;
+  }
+
+  async syncDeletedBoardIndex(file) {
+    if (!this.removeDeletedBoardIndex(file)) return false;
     await this.savePluginData();
     return true;
   }
