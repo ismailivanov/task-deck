@@ -305,6 +305,15 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         folderPath,
         lists: [],
       };
+      // The index frontmatter carries the board's real id. Prefer it so a board
+      // adopted from a synced index keeps the SAME id on every device — including
+      // a board that has lists but no cards yet. Without this the adopter mints a
+      // fresh uid, and since each device then regenerates the index with its own
+      // id, the two devices rewrite the id back and forth on every sync forever.
+      // (A card's kanban-board-id below agrees, and is the fallback for legacy
+      // indexes written before this frontmatter line existed.)
+      const fmBoardId = markdown.match(/^task-deck-board-id:\s*(.+?)\s*$/m);
+      if (fmBoardId && textLine(fmBoardId[1])) board.id = textLine(fmBoardId[1]);
       const listsById = new Map();
       // Build the list structure from the synced metadata (correct ids/titles/
       // colors/order) so a board discovered here matches other devices; cards
@@ -1710,13 +1719,34 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   async cleanupOrphanBoardIndexFiles() {
+    // A generated board index whose folder has no board in THIS device's
+    // data.json is almost always a board just delivered by sync that we haven't
+    // imported yet — NOT junk. We used to trash it here, which was catastrophic:
+    // it destroyed the only cross-device carrier of the board's definition, and
+    // because Sync Deck propagates local deletes, that delete flowed back to the
+    // server and every other device — leaving the board's cards behind as an
+    // invisible, board-less folder everywhere. (restoreBoardsFromIndexFiles only
+    // runs in the one-time reconcile, so an index that syncs in later, or a
+    // savePluginData that races ahead of the reconcile, hit this cleanup first.)
+    //
+    // Adopt the orphan instead: restore the board from its index. It reuses the
+    // board id from the cards, so the adopted board matches other devices. A real
+    // board deletion removes the folder + index explicitly and propagates, so
+    // nothing legitimately orphaned lingers here for us to clean.
     const activeFolders = new Set(this.data.boards.map((board) => board.folderPath).filter(Boolean));
-    const files = this.app.vault.getMarkdownFiles().filter((file) => this.isPotentialBoardIndexFile(file));
-
-    for (const file of files) {
+    const orphanGenerated = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (!this.isPotentialBoardIndexFile(file)) continue;
       const folderPath = file.path.split("/").slice(0, -1).join("/");
       if (activeFolders.has(folderPath)) continue;
-      if (await this.isGeneratedBoardIndexFile(file)) await this.app.vault.trash(file, true);
+      if (await this.isGeneratedBoardIndexFile(file)) orphanGenerated.push(file);
+    }
+    if (!orphanGenerated.length) return;
+
+    const restored = await this.restoreBoardsFromIndexFiles();
+    if (restored) {
+      await this.saveData(this.data);
+      this.refreshViews();
     }
   }
 
