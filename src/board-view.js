@@ -75,6 +75,7 @@ class BoardView extends ItemView {
       return;
     }
 
+    const mode = this.getViewMode(board);
     const toolbar = createElement("div", "ot-toolbar");
     const title = createElement("div", "ot-toolbar-title");
     title.append(iconButton("layout-dashboard", "Boards", () => {
@@ -83,6 +84,7 @@ class BoardView extends ItemView {
     }));
     title.append(createElement("h2", "", board.name));
     if (this.plugin.data.boards.length > 1) title.append(this.renderBoardSelect(board));
+    title.append(this.renderViewSwitch(board, mode));
     toolbar.append(title);
     const actions = createElement("div", "ot-toolbar-actions");
     actions.append(textButton("plus-square", "New board", () => this.plugin.createBoardPrompt()));
@@ -97,11 +99,190 @@ class BoardView extends ItemView {
     );
     toolbar.append(actions);
 
+    // Table view is a second lens over the SAME card data (each Kanban list is a
+    // Status value). No card data changes, so nothing new syncs — the chosen view
+    // is a per-device UI preference kept in data.json. Presence cursors are a
+    // board-layout concept, so they only run in board mode.
+    if (mode === "table") {
+      this.contentEl.append(toolbar, this.renderTable(board));
+      return;
+    }
+
     const scroller = createElement("div", "ot-board-scroll");
     board.lists.forEach((list) => scroller.append(this.renderList(list)));
 
     this.contentEl.append(toolbar, scroller);
     this.startPresence(board);
+  }
+
+  // Per-board, per-device view preference ("board" | "table"). Stored in data.json
+  // (never in the synced index files), so switching lenses can't touch card data.
+  getViewMode(board) {
+    const modes = this.plugin.data.viewModes;
+    return (modes && board && modes[board.id]) || "board";
+  }
+
+  setViewMode(board, mode) {
+    if (!board) return;
+    this.plugin.data.viewModes = this.plugin.data.viewModes || {};
+    if (this.plugin.data.viewModes[board.id] === mode) return;
+    this.plugin.data.viewModes[board.id] = mode;
+    // Light persistence only — a view toggle must NOT rewrite board index files.
+    // Fire-and-forget: the re-render below doesn't depend on the write, and a rare
+    // data.json write failure shouldn't surface as an unhandled rejection.
+    Promise.resolve(this.plugin.saveData(this.plugin.data)).catch(() => {});
+    this.render();
+  }
+
+  renderViewSwitch(board, mode) {
+    const wrap = createElement("div", "ot-view-switch");
+    const tab = (key, icon, label) => {
+      const button = createElement("button", "ot-view-tab" + (mode === key ? " is-active" : ""));
+      button.type = "button";
+      const glyph = createElement("span", "ot-view-tab-icon");
+      try { setIcon(glyph, icon); } catch (error) { glyph.textContent = ""; }
+      button.append(glyph, createElement("span", "", label));
+      button.addEventListener("click", () => this.setViewMode(board, key));
+      return button;
+    };
+    wrap.append(tab("board", "columns", "Board"), tab("table", "table", "Table"));
+    return wrap;
+  }
+
+  // Notion-style table: one row per card across every list, Status = the card's
+  // list. Row click opens the card modal (description + checklist live there);
+  // the Status pill changes the list inline.
+  renderTable(board) {
+    const wrap = createElement("div", "ot-table-wrap");
+    const table = createElement("table", "ot-table");
+    const thead = createElement("thead");
+    const headRow = createElement("tr");
+    ["Task", "Status", "Assignee", "Dates", "Labels"].forEach((label) => headRow.append(createElement("th", "", label)));
+    thead.append(headRow);
+
+    const tbody = createElement("tbody");
+    let count = 0;
+    board.lists.forEach((list) => {
+      (list.cardIds || []).forEach((cardId) => {
+        const card = this.plugin.data.cards[cardId];
+        if (!card) return;
+        tbody.append(this.renderTableRow(card, list, board));
+        count += 1;
+      });
+    });
+
+    table.append(thead, tbody);
+    wrap.append(table);
+    if (!count) wrap.append(createElement("div", "ot-table-empty", "No tasks yet."));
+    wrap.append(this.renderTableComposer(board));
+    return wrap;
+  }
+
+  renderTableRow(card, list, board) {
+    const lockHolder = this.plugin.getCardLockHolder(card.id);
+    const lockedByOther = !!lockHolder;
+    const row = createElement("tr", "ot-table-row");
+    row.dataset.cardId = card.id;
+    if (card.completed) row.classList.add("is-completed");
+    if (lockedByOther) row.classList.add("is-locked");
+    row.addEventListener("click", () => new CardModal(this.app, this.plugin, card.id).open());
+
+    // Task name: complete toggle + title + (checklist/details) hints.
+    const nameCell = createElement("td", "ot-td ot-td-name");
+    const nameInner = createElement("div", "ot-td-name-inner");
+    const complete = iconButton(card.completed ? "check" : "circle", card.completed ? "Mark as incomplete" : "Mark as complete", async (event) => {
+      event.stopPropagation();
+      if (lockedByOther) return this.notifyCardLocked(lockHolder);
+      await this.plugin.toggleCardCompleted(card.id);
+    });
+    complete.classList.add("ot-card-complete-toggle");
+    complete.draggable = false;
+    complete.replaceChildren();
+    if (card.completed) complete.append(createElement("span", "ot-card-complete-mark", "✓"));
+    nameInner.append(complete, createElement("span", "ot-td-title", card.title));
+    const hints = createElement("span", "ot-td-hints");
+    if ((card.checklist || []).length) {
+      const stats = checklistStats(card.checklist);
+      hints.append(createElement("span", "ot-td-hint", `☑ ${stats.done}/${stats.total}`));
+    }
+    if (card.details) hints.append(createElement("span", "ot-td-hint", "☰"));
+    if (hints.childElementCount) nameInner.append(hints);
+    if (lockedByOther) nameInner.append(this.buildLockBadge(lockHolder));
+    nameCell.append(nameInner);
+
+    // Status = the card's list; click to move it to another list inline.
+    const statusCell = createElement("td", "ot-td ot-td-status");
+    const pill = createElement("button", "ot-status-pill");
+    pill.type = "button";
+    const dot = createElement("span", "ot-status-dot");
+    dot.style.setProperty("--ot-status-color", list.color || "#8b8b8b");
+    pill.append(dot, createElement("span", "", list.title));
+    pill.title = "Change status";
+    pill.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (lockedByOther) return this.notifyCardLocked(lockHolder);
+      this.showStatusMenu(event, card, board, list);
+    });
+    statusCell.append(pill);
+
+    // Assignee avatars (reuses the board renderer).
+    const assigneeCell = createElement("td", "ot-td ot-td-assignee");
+    const avatars = this.renderCardAssignees(card);
+    if (avatars.childElementCount) assigneeCell.append(avatars);
+    else assigneeCell.append(createElement("span", "ot-td-empty", "—"));
+
+    const dates = dateRangeLabel(card.startDate, card.dueDate);
+    const dateCell = createElement("td", "ot-td ot-td-dates", dates || "—");
+    if (!dates) dateCell.classList.add("ot-td-empty");
+
+    const labelCell = createElement("td", "ot-td ot-td-labels");
+    (card.labels || []).forEach((label) => {
+      const pillLabel = createElement("span", "ot-card-label", label.name);
+      pillLabel.style.backgroundColor = label.color;
+      pillLabel.title = label.name;
+      labelCell.append(pillLabel);
+    });
+    if (!labelCell.childElementCount) labelCell.append(createElement("span", "ot-td-empty", "—"));
+
+    row.append(nameCell, statusCell, assigneeCell, dateCell, labelCell);
+    return row;
+  }
+
+  showStatusMenu(event, card, board, currentList) {
+    const menu = new Menu();
+    board.lists.forEach((list) => {
+      menu.addItem((item) => {
+        item.setTitle(list.title);
+        if (list.id === currentList.id) item.setChecked(true);
+        item.onClick(async () => {
+          if (list.id === currentList.id) return;
+          await this.plugin.moveCard(card.id, list.id);
+        });
+      });
+    });
+    menu.showAtMouseEvent(event);
+  }
+
+  renderTableComposer(board) {
+    const form = createElement("form", "ot-table-composer");
+    const list = board.lists[0];
+    if (!list) {
+      form.append(createElement("span", "ot-td-empty", "Add a list first to create tasks."));
+      return form;
+    }
+    form.append(createElement("span", "ot-table-composer-plus", "+"));
+    const input = createElement("input", "ot-table-composer-input");
+    input.type = "text";
+    input.placeholder = "New task";
+    form.append(input);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const title = textLine(input.value);
+      if (!title) { input.focus(); return; }
+      input.value = "";
+      await this.plugin.createCard(list.id, title);
+    });
+    return form;
   }
 
   startPresence(board) {

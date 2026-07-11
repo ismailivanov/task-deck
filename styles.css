@@ -1797,3 +1797,169 @@
   height: 24px;
   padding: 0;
 }
+
+/* ---- View switch (Board / Table) ---- */
+.ot-view-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  margin-left: 8px;
+  border-radius: 8px;
+  background: var(--background-modifier-border);
+}
+.ot-view-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85em;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: none;
+}
+.ot-view-tab:hover {
+  color: var(--text-normal);
+}
+.ot-view-tab.is-active {
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.ot-view-tab-icon {
+  display: inline-flex;
+}
+.ot-view-tab-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---- Table view ---- */
+.ot-table-wrap {
+  overflow-x: auto;
+  padding: 4px 2px 32px;
+}
+.ot-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9em;
+}
+.ot-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--background-modifier-border);
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+  z-index: 1;
+}
+.ot-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  vertical-align: middle;
+  color: var(--text-normal);
+}
+.ot-table-row {
+  cursor: pointer;
+}
+.ot-table-row:hover td {
+  background: var(--background-modifier-hover);
+}
+.ot-table-row.is-locked {
+  opacity: 0.75;
+}
+.ot-td-name {
+  min-width: 240px;
+}
+.ot-td-name-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ot-td-title {
+  overflow-wrap: break-word;
+}
+.ot-table-row.is-completed .ot-td-title {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+.ot-td-hints {
+  display: inline-flex;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.ot-td-empty {
+  color: var(--text-faint);
+}
+.ot-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: 0.9em;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.ot-status-pill:hover {
+  background: var(--background-modifier-hover);
+}
+.ot-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--ot-status-color, #8b8b8b);
+}
+.ot-td-assignee .ot-card-assignees {
+  display: inline-flex;
+}
+.ot-td-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.ot-table-empty {
+  padding: 20px 12px;
+  color: var(--text-muted);
+}
+.ot-table-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ot-table-composer-plus {
+  color: var(--text-muted);
+  font-size: 1.1em;
+  line-height: 1;
+}
+.ot-table-composer-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: 0.9em;
+  padding: 2px 0;
+  box-shadow: none;
+}
+.ot-table-composer-input::placeholder {
+  color: var(--text-faint);
+}
+.ot-table-composer-input:focus {
+  outline: none;
+  box-shadow: none;
+}
