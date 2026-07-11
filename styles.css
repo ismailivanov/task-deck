@@ -1902,18 +1902,12 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 3px 10px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
+  padding: 0;
+  background: none;
   color: var(--text-normal);
   font-size: 0.9em;
   cursor: pointer;
   white-space: nowrap;
-  box-shadow: none;
-}
-.ot-status-pill:hover {
-  background: var(--background-modifier-hover);
 }
 .ot-status-dot {
   width: 9px;
@@ -2065,33 +2059,50 @@ body.ot-col-resizing {
   height: 15px;
 }
 /* Inline-edit cell triggers (assignee / dates / labels) */
+/* Inline-edit cells are plain <div>s (NOT buttons) so no theme button chrome can
+   paint a box around them. The only highlight is the row hover — keeps every
+   column flat and aligned. */
 .ot-cell-edit {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   width: 100%;
-  min-height: 26px;
-  padding: 2px 6px;
-  margin: -2px -6px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
+  min-height: 24px;
+  padding: 0;
+  background: none;
   color: inherit;
   font-size: inherit;
   text-align: left;
   cursor: pointer;
-  box-shadow: none;
   overflow: hidden;
-}
-.ot-cell-edit:hover {
-  background: var(--background-modifier-hover);
 }
 .ot-cell-labels {
   flex-wrap: wrap;
 }
-/* Assignee avatars sit at the right edge of their cell. */
 .ot-td-assignee .ot-cell-edit {
   justify-content: flex-start;
+}
+/* Row checkbox — a plain div, not a themed button, so it shows no box. */
+.ot-table-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 1.6px solid var(--text-faint);
+  border-radius: 5px;
+  background: none;
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ot-table-check:hover {
+  border-color: var(--text-muted);
+}
+.ot-table-row.is-completed .ot-table-check {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
 }
 
 /* Custom picker popover (status = colored dots, members = profile pictures) */

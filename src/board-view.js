@@ -404,14 +404,16 @@ class BoardView extends ItemView {
 
     const nameCell = createElement("td", "ot-td ot-td-name");
     const nameInner = createElement("div", "ot-td-name-inner");
-    const complete = iconButton(card.completed ? "check" : "circle", card.completed ? "Mark as incomplete" : "Mark as complete", async (event) => {
+    // A plain <div> checkbox (not a button) so no theme button box appears.
+    const complete = createElement("div", "ot-table-check");
+    complete.setAttribute("role", "checkbox");
+    complete.setAttribute("aria-checked", card.completed ? "true" : "false");
+    complete.setAttribute("aria-label", card.completed ? "Mark as incomplete" : "Mark as complete");
+    complete.addEventListener("click", async (event) => {
       event.stopPropagation();
       if (lockedByOther) return this.notifyCardLocked(lockHolder);
       await this.plugin.toggleCardCompleted(card.id);
     });
-    complete.classList.add("ot-card-complete-toggle");
-    complete.draggable = false;
-    complete.replaceChildren();
     if (card.completed) complete.append(createElement("span", "ot-card-complete-mark", "✓"));
     nameInner.append(complete, createElement("span", "ot-td-title", card.title));
     const hints = createElement("span", "ot-td-hints");
@@ -439,8 +441,7 @@ class BoardView extends ItemView {
 
   renderStatusCell(card, list, board, lockHolder) {
     const cell = createElement("td", "ot-td ot-td-status");
-    const pill = createElement("button", "ot-status-pill");
-    pill.type = "button";
+    const pill = createElement("div", "ot-status-pill");
     const dot = createElement("span", "ot-status-dot");
     dot.style.setProperty("--ot-status-color", list.color || "#8b8b8b");
     pill.append(dot, createElement("span", "", list.title));
@@ -456,8 +457,7 @@ class BoardView extends ItemView {
 
   renderAssigneeCell(card, lockHolder) {
     const cell = createElement("td", "ot-td ot-td-assignee");
-    const trigger = createElement("button", "ot-cell-edit");
-    trigger.type = "button";
+    const trigger = createElement("div", "ot-cell-edit");
     trigger.title = "Assign members";
     const avatars = this.renderCardAssignees(card);
     if (avatars.childElementCount) trigger.append(avatars);
@@ -474,8 +474,7 @@ class BoardView extends ItemView {
   renderDatesCell(card, lockHolder) {
     const cell = createElement("td", "ot-td ot-td-dates");
     const dates = dateRangeLabel(card.startDate, card.dueDate);
-    const trigger = createElement("button", "ot-cell-edit");
-    trigger.type = "button";
+    const trigger = createElement("div", "ot-cell-edit");
     trigger.title = "Edit dates";
     if (dates) trigger.append(createElement("span", "", dates));
     else trigger.append(createElement("span", "ot-td-empty", "＋"));
@@ -490,8 +489,7 @@ class BoardView extends ItemView {
 
   renderLabelsCell(card, lockHolder) {
     const cell = createElement("td", "ot-td ot-td-labels");
-    const trigger = createElement("button", "ot-cell-edit ot-cell-labels");
-    trigger.type = "button";
+    const trigger = createElement("div", "ot-cell-edit ot-cell-labels");
     trigger.title = "Edit labels";
     (card.labels || []).forEach((label) => {
       const pill = createElement("span", "ot-card-label", label.name);
