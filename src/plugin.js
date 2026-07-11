@@ -58,6 +58,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.pendingResync = false;
     this.resyncTimer = null;
 
+    // Undo stack for board/table edits (Cmd/Ctrl+Z). Each user mutation records an
+    // async inverse; undoLast() pops and runs it. applyingUndo suppresses
+    // re-recording while an inverse runs (so it never loops).
+    this.undoStack = [];
+    this.applyingUndo = false;
+
     addIcon(TASK_DECK_ICON, TASK_DECK_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new BoardView(leaf, this));
     this.addSettingTab(new TaskDeckSettingTab(this.app, this));
@@ -108,6 +114,67 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         }
       },
     });
+    this.addCommand({
+      id: "undo-last-change",
+      name: "Undo last change",
+      callback: () => this.undoLast(),
+    });
+    // Cmd/Ctrl+Z undoes the last board/table edit — but only while a Task Deck
+    // board is the active view and the focus isn't in a text field (so it never
+    // steals undo from note editing or an input).
+    this.registerDomEvent(document, "keydown", (event) => {
+      if ((event.key !== "z" && event.key !== "Z") || event.shiftKey || event.altKey) return;
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const target = event.target;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (!this.app.workspace.getActiveViewOfType(BoardView)) return;
+      if (!this.undoStack.length) return;
+      event.preventDefault();
+      this.undoLast();
+    });
+  }
+
+  recordUndo(inverse) {
+    if (this.applyingUndo) return;
+    this.undoStack.push(inverse);
+    if (this.undoStack.length > 50) this.undoStack.shift();
+  }
+
+  async undoLast() {
+    const inverse = this.undoStack.pop();
+    if (!inverse) { new Notice("Nothing to undo"); return; }
+    this.applyingUndo = true;
+    try {
+      await inverse();
+      new Notice("Undone");
+    } catch (error) {
+      console.error("Task Deck undo failed", error);
+      new Notice("Couldn't undo that change.");
+    } finally {
+      this.applyingUndo = false;
+    }
+  }
+
+  // Re-create a card deleted via deleteCard: restore its data, list position, and
+  // note file from the snapshot captured before deletion.
+  async restoreDeletedCard(cardCopy, listId, beforeCardId, fileContent) {
+    const list = this.data.boards.flatMap((board) => board.lists).find((item) => item.id === listId);
+    if (!list) return;
+    this.data.cards[cardCopy.id] = clone(cardCopy);
+    const idx = beforeCardId ? list.cardIds.indexOf(beforeCardId) : -1;
+    if (idx === -1) list.cardIds.push(cardCopy.id);
+    else list.cardIds.splice(idx, 0, cardCopy.id);
+    try {
+      const existing = this.app.vault.getAbstractFileByPath(cardCopy.filePath);
+      if (fileContent != null && existing) await this.app.vault.modify(existing, fileContent);
+      else if (fileContent != null) await this.app.vault.create(cardCopy.filePath, fileContent);
+      else await this.writeCardFile(this.data.cards[cardCopy.id]);
+      if (fileContent != null) this.diskSignatures.set(cardCopy.id, fileContent);
+    } catch (error) {
+      // The card is restored in data even if the note couldn't be rewritten.
+    }
+    await this.savePluginData();
+    this.refreshViews();
   }
 
   async onunload() {
@@ -1263,6 +1330,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     this.data.cards[card.id] = card;
     list.cardIds.unshift(card.id);
+    if (!this.applyingUndo) {
+      const newId = card.id;
+      this.recordUndo(async () => { await this.deleteCard(newId); });
+    }
     // Inserting at the top shifts every other card's index, so rewrite the whole
     // list's files to keep their `position` frontmatter in sync (not just the new
     // card) — otherwise the new order wouldn't propagate to other devices.
@@ -1277,6 +1348,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async updateCard(cardId, patch, globalLabels) {
     const card = this.data.cards[cardId];
     if (!card) return;
+
+    // Snapshot the fields this patch touches so Cmd+Z can restore them.
+    if (!this.applyingUndo) {
+      const before = {};
+      Object.keys(patch).forEach((key) => { before[key] = clone(card[key]); });
+      const beforeGlobal = globalLabels ? clone(this.data.labels) : undefined;
+      this.recordUndo(async () => { await this.updateCard(cardId, before, beforeGlobal); });
+    }
 
     if (globalLabels) this.data.labels = this.normalizeGlobalLabels(globalLabels);
     if (patch.labels) patch.labels = this.normalizeCardLabels(patch.labels);
@@ -1306,6 +1385,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     // Remember where it came from so we can rewrite that list's order too.
     const sourceList = this.data.boards.flatMap((board) => board.lists).find((list) => list.cardIds.includes(cardId)) || null;
+
+    // Snapshot the old list + position so Cmd+Z can move it back exactly.
+    if (!this.applyingUndo && sourceList) {
+      const oldListId = sourceList.id;
+      const oldIndex = sourceList.cardIds.indexOf(cardId);
+      const oldBeforeId = sourceList.cardIds[oldIndex + 1];
+      this.recordUndo(async () => { await this.moveCard(cardId, oldListId, oldBeforeId); });
+    }
 
     this.data.boards.forEach((board) => board.lists.forEach((list) => {
       list.cardIds = list.cardIds.filter((id) => id !== cardId);
@@ -1387,6 +1474,22 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   async deleteCard(cardId, saveAndRefresh = true) {
     const card = this.data.cards[cardId];
     if (!card) return;
+
+    // Snapshot the card + its note before deletion so Cmd+Z can bring it back.
+    // Only for real user deletes (saveAndRefresh), not internal bulk cleanups.
+    if (!this.applyingUndo && saveAndRefresh) {
+      const cardCopy = clone(card);
+      const srcList = this.data.boards.flatMap((board) => board.lists).find((list) => list.cardIds.includes(cardId)) || null;
+      const listId = srcList ? srcList.id : null;
+      const srcIndex = srcList ? srcList.cardIds.indexOf(cardId) : -1;
+      const beforeId = srcIndex >= 0 ? srcList.cardIds[srcIndex + 1] : undefined;
+      let fileContent = null;
+      const noteFile = this.app.vault.getAbstractFileByPath(card.filePath);
+      if (noteFile && noteFile.extension === "md") {
+        try { fileContent = await this.app.vault.read(noteFile); } catch (error) { fileContent = null; }
+      }
+      if (listId) this.recordUndo(async () => { await this.restoreDeletedCard(cardCopy, listId, beforeId, fileContent); });
+    }
 
     this.data.boards.forEach((board) => board.lists.forEach((list) => {
       list.cardIds = list.cardIds.filter((id) => id !== cardId);
