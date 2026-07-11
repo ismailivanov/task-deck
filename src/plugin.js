@@ -141,6 +141,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   async undoLast() {
+    if (this.applyingUndo) return; // ignore a second Cmd+Z while one undo is in flight
     const inverse = this.undoStack.pop();
     if (!inverse) { new Notice("Nothing to undo"); return; }
     this.applyingUndo = true;
@@ -158,18 +159,29 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   // Re-create a card deleted via deleteCard: restore its data, list position, and
   // note file from the snapshot captured before deletion.
   async restoreDeletedCard(cardCopy, listId, beforeCardId, fileContent) {
-    const list = this.data.boards.flatMap((board) => board.lists).find((item) => item.id === listId);
-    if (!list) return;
-    this.data.cards[cardCopy.id] = clone(cardCopy);
+    let board = this.data.boards.find((item) => item.lists.some((list) => list.id === listId));
+    let list = board ? board.lists.find((item) => item.id === listId) : null;
+    if (!list) {
+      // The original list is gone (removed after the delete). Fall back to the
+      // card's board's first list so the card still comes back somewhere visible;
+      // throw only if there's truly nowhere to put it (undoLast surfaces it).
+      board = this.data.boards.find((item) => item.id === cardCopy.boardId) || this.data.boards[0] || null;
+      list = board ? board.lists[0] : null;
+    }
+    if (!board || !list) throw new Error("no list available to restore the card into");
+    const card = clone(cardCopy);
+    card.boardId = board.id;
+    card.listId = list.id;
+    this.data.cards[card.id] = card;
     const idx = beforeCardId ? list.cardIds.indexOf(beforeCardId) : -1;
-    if (idx === -1) list.cardIds.push(cardCopy.id);
-    else list.cardIds.splice(idx, 0, cardCopy.id);
+    if (idx === -1) list.cardIds.push(card.id);
+    else list.cardIds.splice(idx, 0, card.id);
     try {
-      const existing = this.app.vault.getAbstractFileByPath(cardCopy.filePath);
+      const existing = this.app.vault.getAbstractFileByPath(card.filePath);
       if (fileContent != null && existing) await this.app.vault.modify(existing, fileContent);
-      else if (fileContent != null) await this.app.vault.create(cardCopy.filePath, fileContent);
-      else await this.writeCardFile(this.data.cards[cardCopy.id]);
-      if (fileContent != null) this.diskSignatures.set(cardCopy.id, fileContent);
+      else if (fileContent != null) await this.app.vault.create(card.filePath, fileContent);
+      else await this.writeCardFile(card);
+      if (fileContent != null) this.diskSignatures.set(card.id, fileContent);
     } catch (error) {
       // The card is restored in data even if the note couldn't be rewritten.
     }
