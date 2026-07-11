@@ -661,10 +661,13 @@ class AboutModal extends Modal {
  * drops checklist, label, title, or details changes.
  */
 class CardModal extends Modal {
-  constructor(app, plugin, cardId) {
+  constructor(app, plugin, cardId, options = {}) {
     super(app);
     this.plugin = plugin;
     this.cardId = cardId;
+    // notesOnly: show just the title + Description + Checklist (used by the table
+    // view, where labels / members / dates / status are edited inline in the cells).
+    this.notesOnly = !!options.notesOnly;
     this.localTitle = "";
     this.localLabels = [];
     this.localGlobalLabels = [];
@@ -912,8 +915,8 @@ class CardModal extends Modal {
       this.queueSave();
     });
 
-    const labelsField = this.renderLabelsField();
-    const assigneesField = this.renderAssigneesField();
+    const labelsField = this.notesOnly ? null : this.renderLabelsField();
+    const assigneesField = this.notesOnly ? null : this.renderAssigneesField();
     const detailsField = this.renderDetailsField();
     const checklistField = this.renderChecklistField();
 
@@ -948,7 +951,8 @@ class CardModal extends Modal {
 
     actions.append(deleteButton, openNote, close);
 
-    const children = [title, labelsField, assigneesField, detailsField, checklistField, actions];
+    const editableFields = this.notesOnly ? [detailsField, checklistField] : [labelsField, assigneesField, detailsField, checklistField];
+    const children = [title, ...editableFields, actions];
     if (this.readOnly) {
       this.contentEl.addClass("ot-card-readonly");
       const holderName = (this.lockHolder && this.lockHolder.name) || "Someone";
@@ -959,7 +963,7 @@ class CardModal extends Modal {
     if (this.readOnly) {
       title.disabled = true;
       deleteButton.disabled = true;
-      this.disableEditing([labelsField, assigneesField, detailsField, checklistField]);
+      this.disableEditing(editableFields);
     } else if (!this.editingDetails) {
       requestAnimationFrame(() => title.focus());
     }

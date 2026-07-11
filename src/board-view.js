@@ -16,7 +16,7 @@ const {
   textButton,
   textLine,
 } = require("./helpers");
-const { AboutModal, CardDatesModal, CardModal, ListColorModal } = require("./modals");
+const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal } = require("./modals");
 
 // Live board presence (SyncDeck cursors) tuning.
 // The transport stays plain HTTP polling; smoothness comes from client-side
@@ -27,6 +27,9 @@ const PRESENCE_POLL_IDLE_MS = 1100; // GET poll when nobody else is present
 const PRESENCE_HEARTBEAT_MS = 3000; // resend our own point so the server TTL never expires us
 const PRESENCE_SMOOTHING_TAU_MS = 70; // interpolation time constant; lower = snappier, higher = smoother
 const PRESENCE_SNAP_DISTANCE = 0.0006; // normalized distance under which we snap instead of easing
+
+// Drag payload type for reordering table columns (kept distinct from card/list drags).
+const TABLE_COL_DRAG_TYPE = "application/x-task-deck-column";
 
 /**
  * Obsidian view for the task board.
@@ -149,16 +152,110 @@ class BoardView extends ItemView {
     return wrap;
   }
 
+  // The optional (Status = list), reorderable/resizable/hideable columns. "Task"
+  // is always the fixed first column. Definitions live here; per-board layout
+  // (order / hidden / widths) is a per-device preference in data.json.
+  tableColumnDefs() {
+    return [
+      { key: "status", label: "Status" },
+      { key: "assignee", label: "Assignee" },
+      { key: "dates", label: "Dates" },
+      { key: "labels", label: "Labels" },
+    ];
+  }
+
+  defaultColWidth(key) {
+    return { status: 150, assignee: 175, dates: 155, labels: 190 }[key] || 150;
+  }
+
+  getTableConfig(board) {
+    const validKeys = this.tableColumnDefs().map((def) => def.key);
+    const raw = (this.plugin.data.tableConfigs && this.plugin.data.tableConfigs[board.id]) || {};
+    const order = (Array.isArray(raw.order) ? raw.order : []).filter((key) => validKeys.includes(key));
+    validKeys.forEach((key) => { if (!order.includes(key)) order.push(key); });
+    const hidden = new Set((Array.isArray(raw.hidden) ? raw.hidden : []).filter((key) => validKeys.includes(key)));
+    const widths = {};
+    order.forEach((key) => { widths[key] = (raw.widths && raw.widths[key]) || this.defaultColWidth(key); });
+    return { nameWidth: raw.nameWidth || 260, order, hidden, widths };
+  }
+
+  persistTableConfig(board, cfg) {
+    this.plugin.data.tableConfigs = this.plugin.data.tableConfigs || {};
+    this.plugin.data.tableConfigs[board.id] = {
+      nameWidth: cfg.nameWidth,
+      order: cfg.order.slice(),
+      hidden: Array.from(cfg.hidden),
+      widths: Object.assign({}, cfg.widths),
+    };
+    // Per-device UI layout only — never rewrite the synced board files.
+    Promise.resolve(this.plugin.saveData(this.plugin.data)).catch(() => {});
+  }
+
+  reorderColumn(board, cfg, draggedKey, targetKey) {
+    if (draggedKey === targetKey) return;
+    cfg.order = cfg.order.filter((key) => key !== draggedKey);
+    const targetIndex = cfg.order.indexOf(targetKey);
+    cfg.order.splice(targetIndex < 0 ? cfg.order.length : targetIndex, 0, draggedKey);
+    this.persistTableConfig(board, cfg);
+    this.render();
+  }
+
+  moveColumn(board, cfg, key, direction) {
+    const visible = cfg.order.filter((k) => !cfg.hidden.has(k));
+    const neighbour = visible[visible.indexOf(key) + direction];
+    if (!neighbour) return;
+    const from = cfg.order.indexOf(key);
+    const to = cfg.order.indexOf(neighbour);
+    cfg.order[from] = neighbour;
+    cfg.order[to] = key;
+    this.persistTableConfig(board, cfg);
+    this.render();
+  }
+
   // Notion-style table: one row per card across every list, Status = the card's
-  // list. Row click opens the card modal (description + checklist live there);
-  // the Status pill changes the list inline.
+  // list. Row click opens a Description + Checklist card view; every other field
+  // (status, members, dates, labels) is edited inline from its cell.
   renderTable(board) {
+    const cfg = this.getTableConfig(board);
+    const defs = this.tableColumnDefs();
+    const labelOf = (key) => (defs.find((def) => def.key === key) || {}).label || key;
+    const visible = cfg.order.filter((key) => !cfg.hidden.has(key));
+
     const wrap = createElement("div", "ot-table-wrap");
     const table = createElement("table", "ot-table");
+
+    // Fixed layout + a <colgroup> gives each column an exact, drag-resizable width.
+    const colgroup = createElement("colgroup");
+    const nameCol = createElement("col");
+    nameCol.style.width = `${cfg.nameWidth}px`;
+    colgroup.append(nameCol);
+    const colByKey = {};
+    visible.forEach((key) => {
+      const col = createElement("col");
+      col.style.width = `${cfg.widths[key]}px`;
+      colByKey[key] = col;
+      colgroup.append(col);
+    });
+    const addCol = createElement("col");
+    addCol.style.width = "40px";
+    colgroup.append(addCol);
+    table.append(colgroup);
+
     const thead = createElement("thead");
     const headRow = createElement("tr");
-    ["Task", "Status", "Assignee", "Dates", "Labels"].forEach((label) => headRow.append(createElement("th", "", label)));
+    const nameTh = createElement("th", "ot-th ot-th-name");
+    const nameThInner = createElement("div", "ot-th-inner");
+    nameThInner.append(createElement("span", "ot-th-label", "Task"));
+    nameTh.append(nameThInner);
+    nameTh.append(this.buildColResize(nameCol, () => {
+      cfg.nameWidth = parseInt(nameCol.style.width, 10) || cfg.nameWidth;
+      this.persistTableConfig(board, cfg);
+    }, 140));
+    headRow.append(nameTh);
+    visible.forEach((key) => headRow.append(this.renderColumnHeader(board, cfg, key, labelOf(key), colByKey[key])));
+    headRow.append(this.renderAddColumnHeader(board, cfg, defs));
     thead.append(headRow);
+    table.append(thead);
 
     const tbody = createElement("tbody");
     let count = 0;
@@ -166,28 +263,144 @@ class BoardView extends ItemView {
       (list.cardIds || []).forEach((cardId) => {
         const card = this.plugin.data.cards[cardId];
         if (!card) return;
-        tbody.append(this.renderTableRow(card, list, board));
+        tbody.append(this.renderTableRow(card, list, board, visible));
         count += 1;
       });
     });
+    table.append(tbody);
 
-    table.append(thead, tbody);
     wrap.append(table);
     if (!count) wrap.append(createElement("div", "ot-table-empty", "No tasks yet."));
     wrap.append(this.renderTableComposer(board));
     return wrap;
   }
 
-  renderTableRow(card, list, board) {
+  // A drag handle on a column's right edge. Resizes the <col> live, persists on
+  // release. Stops propagation so it never triggers header reorder / sort.
+  buildColResize(col, onEnd, min = 80) {
+    const handle = createElement("div", "ot-col-resize");
+    handle.draggable = false;
+    handle.addEventListener("click", (event) => event.stopPropagation());
+    handle.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startWidth = parseInt(col.style.width, 10) || col.offsetWidth || min;
+      document.body.classList.add("ot-col-resizing");
+      const onMove = (moveEvent) => {
+        col.style.width = `${Math.max(min, startWidth + (moveEvent.clientX - startX))}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.classList.remove("ot-col-resizing");
+        onEnd();
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    return handle;
+  }
+
+  renderColumnHeader(board, cfg, key, label, col) {
+    const th = createElement("th", "ot-th");
+    th.dataset.colKey = key;
+    th.draggable = true;
+    const inner = createElement("div", "ot-th-inner");
+    inner.append(createElement("span", "ot-th-label", label));
+
+    const menuButton = createElement("button", "ot-th-menu");
+    menuButton.type = "button";
+    menuButton.title = "Column options";
+    try { setIcon(menuButton, "chevron-down"); } catch (error) { menuButton.textContent = "▾"; }
+    menuButton.draggable = false;
+    menuButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const menu = new Menu();
+      menu.addItem((item) => item.setTitle("Move left").setIcon("arrow-left").onClick(() => this.moveColumn(board, cfg, key, -1)));
+      menu.addItem((item) => item.setTitle("Move right").setIcon("arrow-right").onClick(() => this.moveColumn(board, cfg, key, 1)));
+      menu.addItem((item) => item.setTitle("Hide column").setIcon("eye-off").onClick(() => {
+        cfg.hidden.add(key);
+        this.persistTableConfig(board, cfg);
+        this.render();
+      }));
+      menu.showAtMouseEvent(event);
+    });
+    inner.append(menuButton);
+    th.append(inner);
+
+    th.addEventListener("dragstart", (event) => {
+      // A drag that begins on the menu caret or the resize handle must not turn
+      // into a column reorder — cancel it so a click/resize there stays intact.
+      if (event.target.closest && event.target.closest(".ot-th-menu, .ot-col-resize")) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.setData(TABLE_COL_DRAG_TYPE, key);
+      event.dataTransfer.effectAllowed = "move";
+      th.classList.add("is-col-dragging");
+    });
+    th.addEventListener("dragend", () => th.classList.remove("is-col-dragging"));
+    th.addEventListener("dragover", (event) => {
+      if (!hasDragType(event, TABLE_COL_DRAG_TYPE)) return;
+      event.preventDefault();
+      th.classList.add("is-col-drop");
+    });
+    th.addEventListener("dragleave", () => th.classList.remove("is-col-drop"));
+    th.addEventListener("drop", (event) => {
+      th.classList.remove("is-col-drop");
+      if (!hasDragType(event, TABLE_COL_DRAG_TYPE)) return;
+      event.preventDefault();
+      const dragged = event.dataTransfer.getData(TABLE_COL_DRAG_TYPE);
+      if (dragged) this.reorderColumn(board, cfg, dragged, key);
+    });
+
+    th.append(this.buildColResize(col, () => {
+      cfg.widths[key] = parseInt(col.style.width, 10) || cfg.widths[key];
+      this.persistTableConfig(board, cfg);
+    }));
+    return th;
+  }
+
+  renderAddColumnHeader(board, cfg, defs) {
+    const th = createElement("th", "ot-th ot-th-add");
+    const button = createElement("button", "ot-th-add-btn");
+    button.type = "button";
+    button.title = "Add a column";
+    try { setIcon(button, "plus"); } catch (error) { button.textContent = "+"; }
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const hidden = cfg.order.filter((key) => cfg.hidden.has(key));
+      const menu = new Menu();
+      if (!hidden.length) {
+        menu.addItem((item) => item.setTitle("All columns shown").setDisabled(true));
+      } else {
+        hidden.forEach((key) => {
+          const label = (defs.find((def) => def.key === key) || {}).label || key;
+          menu.addItem((item) => item.setTitle(label).setIcon("plus").onClick(() => {
+            cfg.hidden.delete(key);
+            this.persistTableConfig(board, cfg);
+            this.render();
+          }));
+        });
+      }
+      menu.showAtMouseEvent(event);
+    });
+    th.append(button);
+    return th;
+  }
+
+  renderTableRow(card, list, board, visible) {
     const lockHolder = this.plugin.getCardLockHolder(card.id);
     const lockedByOther = !!lockHolder;
     const row = createElement("tr", "ot-table-row");
     row.dataset.cardId = card.id;
     if (card.completed) row.classList.add("is-completed");
     if (lockedByOther) row.classList.add("is-locked");
-    row.addEventListener("click", () => new CardModal(this.app, this.plugin, card.id).open());
+    // Opening a task from the table shows ONLY Description + Checklist — every
+    // other field is edited inline from its cell, so no full editor is needed.
+    row.addEventListener("click", () => new CardModal(this.app, this.plugin, card.id, { notesOnly: true }).open());
 
-    // Task name: complete toggle + title + (checklist/details) hints.
     const nameCell = createElement("td", "ot-td ot-td-name");
     const nameInner = createElement("div", "ot-td-name-inner");
     const complete = iconButton(card.completed ? "check" : "circle", card.completed ? "Mark as incomplete" : "Mark as complete", async (event) => {
@@ -209,9 +422,22 @@ class BoardView extends ItemView {
     if (hints.childElementCount) nameInner.append(hints);
     if (lockedByOther) nameInner.append(this.buildLockBadge(lockHolder));
     nameCell.append(nameInner);
+    row.append(nameCell);
 
-    // Status = the card's list; click to move it to another list inline.
-    const statusCell = createElement("td", "ot-td ot-td-status");
+    visible.forEach((key) => row.append(this.renderTableCell(key, card, list, board, lockHolder)));
+    return row;
+  }
+
+  renderTableCell(key, card, list, board, lockHolder) {
+    if (key === "status") return this.renderStatusCell(card, list, board, lockHolder);
+    if (key === "assignee") return this.renderAssigneeCell(card, lockHolder);
+    if (key === "dates") return this.renderDatesCell(card, lockHolder);
+    if (key === "labels") return this.renderLabelsCell(card, lockHolder);
+    return createElement("td", "ot-td");
+  }
+
+  renderStatusCell(card, list, board, lockHolder) {
+    const cell = createElement("td", "ot-td ot-td-status");
     const pill = createElement("button", "ot-status-pill");
     pill.type = "button";
     const dot = createElement("span", "ot-status-dot");
@@ -220,32 +446,66 @@ class BoardView extends ItemView {
     pill.title = "Change status";
     pill.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (lockedByOther) return this.notifyCardLocked(lockHolder);
+      if (lockHolder) return this.notifyCardLocked(lockHolder);
       this.showStatusMenu(event, card, board, list);
     });
-    statusCell.append(pill);
+    cell.append(pill);
+    return cell;
+  }
 
-    // Assignee avatars (reuses the board renderer).
-    const assigneeCell = createElement("td", "ot-td ot-td-assignee");
+  renderAssigneeCell(card, lockHolder) {
+    const cell = createElement("td", "ot-td ot-td-assignee");
+    const trigger = createElement("button", "ot-cell-edit");
+    trigger.type = "button";
+    trigger.title = "Assign members";
     const avatars = this.renderCardAssignees(card);
-    if (avatars.childElementCount) assigneeCell.append(avatars);
-    else assigneeCell.append(createElement("span", "ot-td-empty", "—"));
-
-    const dates = dateRangeLabel(card.startDate, card.dueDate);
-    const dateCell = createElement("td", "ot-td ot-td-dates", dates || "—");
-    if (!dates) dateCell.classList.add("ot-td-empty");
-
-    const labelCell = createElement("td", "ot-td ot-td-labels");
-    (card.labels || []).forEach((label) => {
-      const pillLabel = createElement("span", "ot-card-label", label.name);
-      pillLabel.style.backgroundColor = label.color;
-      pillLabel.title = label.name;
-      labelCell.append(pillLabel);
+    if (avatars.childElementCount) trigger.append(avatars);
+    else trigger.append(createElement("span", "ot-td-empty", "＋"));
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (lockHolder) return this.notifyCardLocked(lockHolder);
+      this.showAssigneeMenu(event, card);
     });
-    if (!labelCell.childElementCount) labelCell.append(createElement("span", "ot-td-empty", "—"));
+    cell.append(trigger);
+    return cell;
+  }
 
-    row.append(nameCell, statusCell, assigneeCell, dateCell, labelCell);
-    return row;
+  renderDatesCell(card, lockHolder) {
+    const cell = createElement("td", "ot-td ot-td-dates");
+    const dates = dateRangeLabel(card.startDate, card.dueDate);
+    const trigger = createElement("button", "ot-cell-edit");
+    trigger.type = "button";
+    trigger.title = "Edit dates";
+    if (dates) trigger.append(createElement("span", "", dates));
+    else trigger.append(createElement("span", "ot-td-empty", "＋"));
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (lockHolder) return this.notifyCardLocked(lockHolder);
+      new CardDatesModal(this.app, this.plugin, card.id).open();
+    });
+    cell.append(trigger);
+    return cell;
+  }
+
+  renderLabelsCell(card, lockHolder) {
+    const cell = createElement("td", "ot-td ot-td-labels");
+    const trigger = createElement("button", "ot-cell-edit ot-cell-labels");
+    trigger.type = "button";
+    trigger.title = "Edit labels";
+    (card.labels || []).forEach((label) => {
+      const pill = createElement("span", "ot-card-label", label.name);
+      pill.style.backgroundColor = label.color;
+      pill.title = label.name;
+      trigger.append(pill);
+    });
+    if (!(card.labels || []).length) trigger.append(createElement("span", "ot-td-empty", "＋"));
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (lockHolder) return this.notifyCardLocked(lockHolder);
+      this.openLabelPicker(card);
+    });
+    cell.append(trigger);
+    return cell;
   }
 
   showStatusMenu(event, card, board, currentList) {
@@ -261,6 +521,32 @@ class BoardView extends ItemView {
       });
     });
     menu.showAtMouseEvent(event);
+  }
+
+  showAssigneeMenu(event, card) {
+    const members = this.plugin.getVaultMembers();
+    const menu = new Menu();
+    if (!members.length) {
+      menu.addItem((item) => item.setTitle("No members — sign in to Sync Deck").setDisabled(true));
+    } else {
+      const current = card.assignees || [];
+      members.forEach((member) => {
+        const assigned = current.some((a) => a && a.email === member.email);
+        menu.addItem((item) => item.setTitle(member.name || member.email).setChecked(assigned).onClick(async () => {
+          const next = assigned
+            ? current.filter((a) => a && a.email !== member.email)
+            : [...current, { email: member.email, name: member.name, color: member.color }];
+          await this.plugin.updateCard(card.id, { assignees: next });
+        }));
+      });
+    }
+    menu.showAtMouseEvent(event);
+  }
+
+  openLabelPicker(card) {
+    new LabelPickerModal(this.app, this.plugin.data.labels || [], card.labels || [], async (labels, selectedLabels) => {
+      await this.plugin.updateCard(card.id, { labels: selectedLabels }, labels);
+    }).open();
   }
 
   renderTableComposer(board) {

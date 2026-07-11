@@ -1963,3 +1963,129 @@
   outline: none;
   box-shadow: none;
 }
+
+/* ---- Table view: resizable / hideable / reorderable columns ---- */
+.ot-table {
+  table-layout: fixed;
+  width: max-content;
+}
+.ot-table th,
+.ot-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ot-th {
+  position: relative;
+}
+.ot-th-inner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ot-th-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.ot-th[draggable="true"] {
+  cursor: grab;
+}
+.ot-th.is-col-dragging {
+  opacity: 0.4;
+}
+.ot-th.is-col-drop {
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+.ot-th-menu {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  box-shadow: none;
+}
+.ot-th:hover .ot-th-menu {
+  opacity: 1;
+}
+.ot-th-menu:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.ot-th-menu svg {
+  width: 13px;
+  height: 13px;
+}
+.ot-col-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+.ot-col-resize:hover {
+  box-shadow: inset -2px 0 0 var(--interactive-accent);
+}
+body.ot-col-resizing {
+  cursor: col-resize !important;
+  user-select: none;
+}
+.ot-th-add {
+  padding: 4px 6px;
+}
+.ot-th-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  box-shadow: none;
+}
+.ot-th-add-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.ot-th-add-btn svg {
+  width: 15px;
+  height: 15px;
+}
+/* Inline-edit cell triggers (assignee / dates / labels) */
+.ot-cell-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 26px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+  overflow: hidden;
+}
+.ot-cell-edit:hover {
+  background: var(--background-modifier-hover);
+}
+.ot-cell-labels {
+  flex-wrap: wrap;
+}
