@@ -1177,6 +1177,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       lists: [],
     };
 
+    // Most people run a To do / Doing / Done flow, so seed those three lists by
+    // default (grey / blue / green via defaultListColor). Opt out in settings.
+    if (this.data.seedDefaultLists !== false) {
+      ["To do", "Doing", "Done"].forEach((title, index) => {
+        board.lists.push({ id: uid("list"), title, color: this.defaultListColor(index), cardIds: [] });
+      });
+    }
+
     this.data.boards.push(board);
     this.data.activeBoardId = board.id;
     await this.ensureBoardFolder(board);
