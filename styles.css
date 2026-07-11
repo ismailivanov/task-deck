@@ -1919,12 +1919,9 @@
 .ot-td-assignee .ot-card-assignees {
   display: inline-flex;
 }
-.ot-td-labels {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
+/* NEVER set display:flex on a <td> — it drops the cell out of the table's
+   row/column grid and knocks that column out of alignment. The label pills wrap
+   inside the .ot-cell-labels div instead; the cell stays a normal table-cell. */
 .ot-table-empty {
   padding: 20px 12px;
   color: var(--text-muted);

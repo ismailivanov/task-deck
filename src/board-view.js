@@ -428,6 +428,9 @@ class BoardView extends ItemView {
     row.append(nameCell);
 
     visible.forEach((key) => row.append(this.renderTableCell(key, card, list, board, lockHolder)));
+    // Trailing empty cell under the "+" add-column header, so every body row has
+    // the same cell count as the header (keeps the fixed-layout grid aligned).
+    row.append(createElement("td", "ot-td ot-td-addcell"));
     return row;
   }
 
