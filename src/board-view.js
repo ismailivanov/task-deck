@@ -397,6 +397,11 @@ class BoardView extends ItemView {
     const row = createElement("tr", "ot-table-row");
     row.dataset.cardId = card.id;
     if (card.completed) row.classList.add("is-completed");
+    if (card.completed && this.plugin.completedAnimationCardId === card.id) {
+      row.classList.add("is-just-completed");
+      this.plugin.completedAnimationCardId = null;
+      window.setTimeout(() => row.classList.remove("is-just-completed"), 650);
+    }
     if (lockedByOther) row.classList.add("is-locked");
     // Opening a task from the table shows ONLY Description + Checklist — every
     // other field is edited inline from its cell, so no full editor is needed.
