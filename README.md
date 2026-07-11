@@ -1,9 +1,9 @@
-# Obsidian Nextcloud Deck
+# NextDeck (formerly Obsidian Nextcloud Deck)
 
 [![Obsidian](https://img.shields.io/badge/Obsidian-1.5%2B-7c3aed?logo=obsidian&logoColor=white)](https://obsidian.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f1c40f.svg)](LICENSE)
 
-Obsidian Nextcloud Deck is a Kanban plugin for Obsidian, with every card stored as a real Markdown note in your vault and two-way sync against the [Nextcloud Deck](https://github.com/nextcloud/deck) REST API. You keep full control of the data on your own Nextcloud server — no third-party cloud, no shared telemetry.
+NextDeck is a Kanban plugin for Obsidian, with every card stored as a real Markdown note in your vault and two-way sync against the [Nextcloud Deck](https://github.com/nextcloud/deck) REST API. You keep full control of the data on your own Nextcloud server — no third-party cloud, no shared telemetry.
 
 Forked from [Task Deck](https://github.com/ismailivanov/task-deck) and refocused on Nextcloud as the sync backend.
 
@@ -28,7 +28,7 @@ Forked from [Task Deck](https://github.com/ismailivanov/task-deck) and refocused
 1. Install the community plugin [Obsidian BRAT](https://github.com/TfTHacker/obsidian42-brat).
 2. In BRAT settings, **Add beta plugin**: `onlymykazari/obsidian-nextcloud-deck`.
 3. Optionally pin a version (e.g. `0.5.0-pre.3`).
-4. Enable **Obsidian Nextcloud Deck** in *Community plugins*.
+4. Enable **NextDeck** in *Community plugins*.
 
 ### Manual
 
@@ -38,7 +38,7 @@ Download `main.js`, `manifest.json`, and `styles.css` from a [release](https://g
 Your Vault/.obsidian/plugins/obsidian-nextcloud-deck/
 ```
 
-Then enable **Obsidian Nextcloud Deck** from *Community plugins*.
+Then enable **NextDeck** from *Community plugins*.
 
 ## Usage
 
@@ -56,7 +56,7 @@ If you create a Markdown card directly inside a board folder, the plugin picks i
 
 ### Sync with Nextcloud
 
-1. Open **Settings → Obsidian Nextcloud Deck → Nextcloud sync**.
+1. Open **Settings → NextDeck → Nextcloud sync**.
 2. Enter your Nextcloud server URL (e.g. `https://cloud.example.com`).
 3. Click **Sign in with browser** — a Login Flow v2 session opens, and the App Password is returned automatically after you approve it. If your environment blocks the browser flow, use **Paste App Password** instead (generate one at *Nextcloud → Settings → Security → Devices & sessions*).
 4. **Test connection** confirms the credentials work.
