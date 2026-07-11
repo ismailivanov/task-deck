@@ -1,7 +1,7 @@
 const { Notice, PluginSettingTab, Setting } = require("obsidian");
 
-// Settings tab for board access, card-note sync, support, and version info.
-const { DONATION_URL, RELAY_URL } = require("./helpers");
+// Settings tab for board access, sync, preferences, support, and version info.
+const { DONATION_URL } = require("./helpers");
 
 /**
  * Obsidian settings tab for Task Deck.
@@ -19,69 +19,84 @@ class TaskDeckSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Task Deck" });
     containerEl.createEl("p", {
-      text: "A Trello-style task board for Obsidian with Markdown-backed cards, global labels, dates, and checklists.",
+      text: "Trello-style boards backed by Markdown card notes — with a table view, labels, dates, checklists, and per-card members.",
     });
 
-    new Setting(containerEl)
-      .setName("Board folders")
-      .setDesc("Each board stores its Markdown cards in a folder named after that board.");
+    // ---- Board ----
+    new Setting(containerEl).setName("Board").setHeading();
 
     new Setting(containerEl)
-      .setName("Open board")
-      .setDesc("Open the Task Deck board view.")
-      .addButton((button) => {
-        button
-          .setButtonText("Open")
-          .setCta()
-          .onClick(() => this.plugin.activateView());
-      });
+      .setName("Open Task Deck")
+      .setDesc("Open the board / table view.")
+      .addButton((button) => button.setButtonText("Open").setCta().onClick(() => this.plugin.activateView()));
 
     new Setting(containerEl)
-      .setName("Sync card notes")
-      .setDesc("Import Markdown cards created outside the board inside the card folder.")
-      .addButton((button) => {
-        button
-          .setButtonText("Sync now")
-          .onClick(async () => {
-            await this.plugin.syncCardsFromFolder();
-            this.plugin.refreshViews();
-            new Notice("Task Deck synced.");
-          });
-      });
+      .setName("Start new boards with To do / Doing / Done")
+      .setDesc("New boards come with three ready-made lists (grey, blue, green). Turn off to start empty.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.data.seedDefaultLists !== false)
+        .onChange(async (value) => {
+          this.plugin.data.seedDefaultLists = value;
+          await this.plugin.savePluginData();
+        }));
 
     new Setting(containerEl)
-      .setName("Realtime collaboration")
-      .setDesc("Use Relay by sharing the Task Deck board folders you want to collaborate on.")
-      .addButton((button) => {
-        button
-          .setButtonText("Open Relay")
-          .onClick(() => window.open(RELAY_URL, "_blank"));
-      });
+      .setName("Compact labels")
+      .setDesc("Show labels as small colour bars on cards instead of full pills.")
+      .addToggle((toggle) => toggle
+        .setValue(!!this.plugin.data.compactLabels)
+        .onChange(async (value) => {
+          this.plugin.data.compactLabels = value;
+          await this.plugin.savePluginData();
+          this.plugin.refreshViews();
+        }));
 
     new Setting(containerEl)
       .setName("Completion sound")
       .setDesc("Play a short sound when a card is marked complete.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.data.completionSound !== false)
-          .onChange(async (value) => {
-            this.plugin.data.completionSound = value;
-            await this.plugin.savePluginData();
-          });
-      });
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.data.completionSound !== false)
+        .onChange(async (value) => {
+          this.plugin.data.completionSound = value;
+          await this.plugin.savePluginData();
+        }));
+
+    // ---- Sync & collaboration ----
+    new Setting(containerEl).setName("Sync & collaboration").setHeading();
+
+    const hasSyncDeck = !!this.plugin.getSyncDeckPlugin();
+    new Setting(containerEl)
+      .setName("Sync Deck")
+      .setDesc(hasSyncDeck
+        ? "Installed. Your boards sync across devices and teammates in real time, with live presence and per-card members."
+        : "Install Sync Deck to sync boards across your devices, collaborate live with presence, and assign members to cards.")
+      .addButton((button) => button
+        .setButtonText(hasSyncDeck ? "Open Sync Deck" : "Get Sync Deck")
+        .setCta()
+        .onClick(() => this.plugin.openSyncDeck()));
+
+    new Setting(containerEl)
+      .setName("Re-import card notes")
+      .setDesc("Pull in Markdown cards added or edited outside the board (inside a board folder).")
+      .addButton((button) => button
+        .setButtonText("Sync now")
+        .onClick(async () => {
+          await this.plugin.syncCardsFromFolder();
+          this.plugin.refreshViews();
+          new Notice("Task Deck synced.");
+        }));
+
+    // ---- About ----
+    new Setting(containerEl).setName("About").setHeading();
 
     new Setting(containerEl)
       .setName("Support development")
-      .setDesc("Open the donation page.")
-      .addButton((button) => {
-        button
-          .setButtonText("Donate")
-          .onClick(() => window.open(DONATION_URL, "_blank"));
-      });
+      .setDesc("If Task Deck is useful, you can support it here.")
+      .addButton((button) => button.setButtonText("Donate").onClick(() => window.open(DONATION_URL, "_blank")));
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc(this.plugin.manifest.version || "0.1.9");
+      .setDesc(this.plugin.manifest.version || "");
   }
 }
 

@@ -18,7 +18,6 @@ const TASK_DECK_ICON_SVG = `
 `;
 const LIST_DRAG_TYPE = "application/x-task-deck-list";
 const DONATION_URL = "https://buymeacoffee.com/carbon06";
-const RELAY_URL = "https://community.obsidian.md/plugins/system3-relay";
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico"];
 const DEFAULT_LABEL_COLOR = "#2f6fd6";
 const LABEL_COLORS = [
@@ -29,7 +28,9 @@ const LABEL_COLORS = [
   "#2465c7", "#2b7c8e", "#4f7822", "#a33e78", "#73787f",
   "#68a0ee", "#70c1d8", "#96c949", "#dc6ab5", "#a3a6aa",
 ];
-const LIST_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#ec4899", "#94a3b8"];
+// Default list-color sequence. Grey → blue → green first so a fresh board's
+// To do / Doing / Done reads the way most people expect.
+const LIST_COLORS = ["#94a3b8", "#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#ec4899"];
 
 /**
  * Minimal saved-data shape used when the plugin starts with no existing board.
@@ -607,7 +608,6 @@ module.exports = {
   TASK_DECK_ICON_SVG,
   LIST_DRAG_TYPE,
   DONATION_URL,
-  RELAY_URL,
   IMAGE_EXTENSIONS,
   DEFAULT_LABEL_COLOR,
   LABEL_COLORS,
