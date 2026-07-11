@@ -442,12 +442,23 @@ class BoardView extends ItemView {
     return createElement("td", "ot-td");
   }
 
+  // A filled, Notion-style status pill: a soft tint of the list color + a solid
+  // dot + label. Shared by the cell and the picker so they match.
+  buildStatusPill(list) {
+    const color = list.color || "#8b8b8b";
+    const pill = createElement("div", "ot-status-pill");
+    // 8-digit hex adds alpha, giving a soft tint that blends with light OR dark.
+    pill.style.background = /^#[0-9a-fA-F]{6}$/.test(color) ? `${color}33` : color;
+    const dot = createElement("span", "ot-status-dot");
+    dot.style.setProperty("--ot-status-color", color);
+    pill.append(dot, createElement("span", "", list.title));
+    return pill;
+  }
+
   renderStatusCell(card, list, board, lockHolder) {
     const cell = createElement("td", "ot-td ot-td-status");
-    const pill = createElement("div", "ot-status-pill");
-    const dot = createElement("span", "ot-status-dot");
-    dot.style.setProperty("--ot-status-color", list.color || "#8b8b8b");
-    pill.append(dot, createElement("span", "", list.title));
+    const pill = this.buildStatusPill(list);
+    pill.classList.add("is-clickable");
     pill.title = "Change status";
     pill.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -562,9 +573,8 @@ class BoardView extends ItemView {
   showStatusMenu(event, card, board, currentList) {
     this.openTablePopover(event.currentTarget, (pop, close) => {
       board.lists.forEach((list) => {
-        const dot = createElement("span", "ot-status-dot");
-        dot.style.setProperty("--ot-status-color", list.color || "#8b8b8b");
-        const row = this.popoverRow(dot, list.title, list.id === currentList.id);
+        // Each option is a full status pill (Notion-style), check on the current.
+        const row = this.popoverRow(this.buildStatusPill(list), "", list.id === currentList.id);
         row.addEventListener("click", async () => {
           close();
           if (list.id !== currentList.id) await this.plugin.moveCard(card.id, list.id);

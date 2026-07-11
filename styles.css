@@ -426,7 +426,7 @@
 .ot-label-pill {
   max-width: 100%;
   border: 0;
-  border-radius: 999px;
+  border-radius: 4px;
   padding: 2px 8px;
   overflow: hidden;
   color: white;
@@ -1902,12 +1902,15 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 0;
-  background: none;
+  padding: 3px 9px;
+  border-radius: 4px;
   color: var(--text-normal);
   font-size: 0.9em;
-  cursor: pointer;
+  font-weight: 500;
   white-space: nowrap;
+}
+.ot-status-pill.is-clickable {
+  cursor: pointer;
 }
 .ot-status-dot {
   width: 9px;
