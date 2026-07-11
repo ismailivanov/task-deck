@@ -2534,6 +2534,7 @@ class BoardView extends ItemView {
 
   async onClose() {
     this.stopPresence();
+    this.closeTablePopover();
   }
 
   render() {
@@ -2978,39 +2979,97 @@ class BoardView extends ItemView {
     return cell;
   }
 
+  // A small custom dropdown anchored under `anchor`. Obsidian's Menu can only show
+  // text + a lucide icon, but the status picker needs a colored dot and the member
+  // picker needs profile pictures — so those use this instead. `build(pop, close)`
+  // fills the rows. It survives a board re-render (it lives on document.body), so
+  // the assignee picker can stay open across multi-select toggles.
+  openTablePopover(anchor, build) {
+    this.closeTablePopover();
+    const pop = createElement("div", "ot-popover");
+    const rect = anchor.getBoundingClientRect();
+    pop.style.top = `${Math.round(rect.bottom + 4)}px`;
+    pop.style.left = `${Math.round(rect.left)}px`;
+    pop.style.minWidth = `${Math.max(190, Math.round(rect.width))}px`;
+    document.body.append(pop);
+    const close = () => this.closeTablePopover();
+    build(pop, close);
+    const onDown = (event) => { if (!pop.contains(event.target)) close(); };
+    const onKey = (event) => { if (event.key === "Escape") close(); };
+    // Attach synchronously: the picker opens on a `click`, so THIS gesture's
+    // mousedown already fired before we get here — the outside-close handler can't
+    // self-trigger on it, and there's no deferred-add window that could leak.
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    pop._cleanup = () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+    this._tablePopover = pop;
+  }
+
+  closeTablePopover() {
+    if (!this._tablePopover) return;
+    if (this._tablePopover._cleanup) this._tablePopover._cleanup();
+    this._tablePopover.remove();
+    this._tablePopover = null;
+  }
+
+  popoverRow(leading, label, checked) {
+    const row = createElement("button", "ot-popover-row");
+    row.type = "button";
+    if (leading) row.append(leading);
+    row.append(createElement("span", "ot-popover-label", label));
+    if (checked) {
+      const check = createElement("span", "ot-popover-check");
+      try { setIcon(check, "check"); } catch (error) { check.textContent = "✓"; }
+      row.append(check);
+    }
+    return row;
+  }
+
   showStatusMenu(event, card, board, currentList) {
-    const menu = new Menu();
-    board.lists.forEach((list) => {
-      menu.addItem((item) => {
-        item.setTitle(list.title);
-        if (list.id === currentList.id) item.setChecked(true);
-        item.onClick(async () => {
-          if (list.id === currentList.id) return;
-          await this.plugin.moveCard(card.id, list.id);
+    this.openTablePopover(event.currentTarget, (pop, close) => {
+      board.lists.forEach((list) => {
+        const dot = createElement("span", "ot-status-dot");
+        dot.style.setProperty("--ot-status-color", list.color || "#8b8b8b");
+        const row = this.popoverRow(dot, list.title, list.id === currentList.id);
+        row.addEventListener("click", async () => {
+          close();
+          if (list.id !== currentList.id) await this.plugin.moveCard(card.id, list.id);
         });
+        pop.append(row);
       });
     });
-    menu.showAtMouseEvent(event);
   }
 
   showAssigneeMenu(event, card) {
     const members = this.plugin.getVaultMembers();
-    const menu = new Menu();
-    if (!members.length) {
-      menu.addItem((item) => item.setTitle("No members — sign in to Sync Deck").setDisabled(true));
-    } else {
-      const current = card.assignees || [];
-      members.forEach((member) => {
-        const assigned = current.some((a) => a && a.email === member.email);
-        menu.addItem((item) => item.setTitle(member.name || member.email).setChecked(assigned).onClick(async () => {
-          const next = assigned
-            ? current.filter((a) => a && a.email !== member.email)
-            : [...current, { email: member.email, name: member.name, color: member.color }];
-          await this.plugin.updateCard(card.id, { assignees: next });
-        }));
-      });
-    }
-    menu.showAtMouseEvent(event);
+    this.openTablePopover(event.currentTarget, (pop) => {
+      if (!members.length) {
+        pop.append(createElement("div", "ot-popover-empty", "No members — sign in to Sync Deck"));
+        return;
+      }
+      const paint = () => {
+        pop.replaceChildren();
+        const current = ((this.plugin.data.cards[card.id] || card).assignees) || [];
+        members.forEach((member) => {
+          const assigned = current.some((a) => a && a.email === member.email);
+          const row = this.popoverRow(this.buildAvatar(member), member.name || member.email, assigned);
+          row.addEventListener("click", async () => {
+            const now = ((this.plugin.data.cards[card.id] || card).assignees) || [];
+            const on = now.some((a) => a && a.email === member.email);
+            const next = on
+              ? now.filter((a) => a && a.email !== member.email)
+              : [...now, { email: member.email, name: member.name, color: member.color }];
+            await this.plugin.updateCard(card.id, { assignees: next });
+            paint(); // keep the picker open and refresh the checks for multi-select
+          });
+          pop.append(row);
+        });
+      };
+      paint();
+    });
   }
 
   openLabelPicker(card) {
