@@ -2533,6 +2533,34 @@ class CardModal extends Modal {
     }
 
     const actions = createElement("div", "ot-attachment-actions");
+    const copyUrlBtn = iconButton("link", "Copy Obsidian URL", async () => {
+      if (!attachment.filePath) {
+        new Notice("Attachment has no vault path yet.");
+        return;
+      }
+      const vaultName = (this.app.vault && typeof this.app.vault.getName === "function")
+        ? this.app.vault.getName()
+        : "";
+      const url = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(attachment.filePath)}`;
+      try {
+        if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(url);
+        } else {
+          const holder = document.createElement("textarea");
+          holder.value = url;
+          holder.setAttribute("readonly", "");
+          holder.style.position = "absolute";
+          holder.style.left = "-9999px";
+          document.body.appendChild(holder);
+          holder.select();
+          document.execCommand("copy");
+          document.body.removeChild(holder);
+        }
+        new Notice("Obsidian URL copied to clipboard.");
+      } catch (error) {
+        new Notice(`Copy failed: ${(error && error.message) || error}`);
+      }
+    });
     const openBtn = iconButton("external-link", "Open", async () => {
       if (!file) {
         new Notice("File no longer exists in the vault.");
@@ -2561,7 +2589,7 @@ class CardModal extends Modal {
       try { await this.plugin.saveData(this.plugin.data); } catch (error) { /* best-effort */ }
       onRefresh();
     });
-    actions.append(openBtn, delBtn);
+    actions.append(copyUrlBtn, openBtn, delBtn);
 
     tile.append(thumb, meta, actions);
     return tile;
