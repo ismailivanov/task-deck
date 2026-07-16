@@ -4101,6 +4101,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     // card id. writeCardFile compares against it so a note another device just
     // delivered is never clobbered by our (possibly stale) in-memory card.
     this.diskSignatures = new Map();
+    // Same optimistic-concurrency guard for each board's generated index file, so
+    // a stale startup rewrite never reverts an index Sync Deck just pulled in
+    // (boardId -> the exact index Markdown we last read from / wrote to disk).
+    this.indexSignatures = new Map();
     this.pendingResync = false;
     this.resyncTimer = null;
 
@@ -4307,7 +4311,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         this.data.layoutMigrated = true;
       }
       await this.writeAllCardFiles();
-      await this.writeBoardIndexFiles();
+      // bulk: the startup pass must not overwrite an index that's newer on disk
+      // than our (possibly stale) data.json — adopt it instead of reverting it.
+      await this.writeBoardIndexFiles({ bulk: true });
       await this.syncGraphColorGroups();
       this.updateExplorerColors();
       if (restored || prunedVanished || renamed || deduped || migratedLayout || this.loadNeedsSave || removedIndexCards) await this.saveData(this.data);
@@ -5869,15 +5875,42 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
    * Keeps card notes connected in Obsidian's graph without adding extra text to
    * every card file.
    */
-  async writeBoardIndexFiles() {
+  async writeBoardIndexFiles(options = {}) {
     for (const board of this.data.boards) {
-      await this.writeBoardIndexFile(board);
+      await this.writeBoardIndexFile(board, options);
     }
     await this.cleanupOrphanBoardIndexFiles();
     this.updateExplorerColors();
   }
 
-  async writeBoardIndexFile(board) {
+  // Adopt a KNOWN board's list structure (ids/titles/colours/order + deleted-list
+  // tombstones) from an index file that changed on disk under us — used when a
+  // newer index arrived (e.g. Sync Deck pulled it) so we DON'T revert it. Cards
+  // re-attach to their lists by frontmatter on the next folder sync.
+  importListStructureFromIndex(board, markdown) {
+    const listMeta = decodeListMeta(markdown);
+    const metaLists = listMeta && Array.isArray(listMeta.lists) ? listMeta.lists : null;
+    if (!metaLists || !metaLists.length) return false;
+    const tombstones = new Set(listMeta && Array.isArray(listMeta.deleted) ? listMeta.deleted : []);
+    const existingById = new Map(board.lists.map((list) => [list.id, list]));
+    const next = [];
+    metaLists.forEach((entry, index) => {
+      if (!entry || !entry.i || tombstones.has(entry.i)) return;
+      const existing = existingById.get(entry.i);
+      next.push({
+        id: entry.i,
+        title: entry.t || (existing && existing.title) || "List",
+        color: cleanColor(entry.c) || (existing && existing.color) || this.defaultListColor(index),
+        cardIds: existing ? existing.cardIds : [],
+      });
+    });
+    if (!next.length) return false;
+    board.lists = next;
+    board.deletedListIds = Array.from(tombstones);
+    return true;
+  }
+
+  async writeBoardIndexFile(board, options = {}) {
     if (!board) return;
     await this.ensureBoardFolder(board);
 
@@ -5910,16 +5943,46 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     const markdown = lines.join("\n");
     const file = this.app.vault.getAbstractFileByPath(this.boardIndexPath(board));
-    if (file && file.extension === "md") {
-      // Only rewrite when content actually changed. Rewriting an identical index
-      // would re-upload it and re-trigger the peer's reconcile, causing endless
-      // index churn between two devices.
-      let current = null;
-      try { current = await this.app.vault.read(file); } catch (error) { current = null; }
-      if (current !== markdown) await this.app.vault.modify(file, markdown);
-    } else if (!file) {
-      await this.app.vault.create(this.boardIndexPath(board), markdown);
+    if (!file || file.extension !== "md") {
+      if (!file) {
+        await this.app.vault.create(this.boardIndexPath(board), markdown);
+        this.indexSignatures.set(board.id, markdown);
+      }
+      await this.cleanupBoardIndexFiles(board);
+      return;
     }
+
+    let current = null;
+    try { current = await this.app.vault.read(file); } catch (error) { current = null; }
+    // Identical already — record the signature and stop (rewriting it would just
+    // churn the index back and forth between devices).
+    if (current === markdown) {
+      this.indexSignatures.set(board.id, markdown);
+      await this.cleanupBoardIndexFiles(board);
+      return;
+    }
+
+    // Optimistic concurrency (mirrors writeCardFile): NEVER overwrite an index
+    // that changed on disk under us — that stale rewrite is exactly what reverted
+    // everyone's board on open (a Sync Deck pull delivers a newer index, and our
+    // startup regenerate-from-stale-data.json used to clobber it and re-upload the
+    // revert). Instead adopt the newer structure and re-import; only write when
+    // the on-disk index is the one WE last touched.
+    const seen = this.indexSignatures.get(board.id);
+    const changedUnderUs = current !== null && seen !== undefined && current !== seen;
+    const unknownDisk = options.bulk && current !== null && seen === undefined;
+    if (changedUnderUs || unknownDisk) {
+      this.indexSignatures.set(board.id, current);
+      if (this.importListStructureFromIndex(board, current)) {
+        this.pendingResync = true;
+        this.queueResync();
+      }
+      await this.cleanupBoardIndexFiles(board);
+      return;
+    }
+
+    await this.app.vault.modify(file, markdown);
+    this.indexSignatures.set(board.id, markdown);
     await this.cleanupBoardIndexFiles(board);
   }
 
