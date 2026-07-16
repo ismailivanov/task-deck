@@ -2544,6 +2544,11 @@ class BoardView extends ItemView {
     this.contentEl.addClass("ot-board-root");
     this.contentEl.classList.toggle("is-compact-labels", !!this.plugin.data.compactLabels);
 
+    // Update banner sits above everything (board home OR a board), so it shows
+    // before the user does anything.
+    const updateBanner = this.renderUpdateBanner();
+    if (updateBanner) this.contentEl.append(updateBanner);
+
     if (!board || this.showingBoardHome) {
       this.renderBoardHome();
       return;
@@ -2587,6 +2592,23 @@ class BoardView extends ItemView {
 
     this.contentEl.append(toolbar, scroller);
     this.startPresence(board);
+  }
+
+  // "Update available" banner shown at the top when a newer GitHub release exists
+  // (Task Deck is installed manually, so it gets no community-store prompt).
+  renderUpdateBanner() {
+    const info = this.plugin.updateAvailable;
+    if (!info) return null;
+    const banner = createElement("div", "ot-update-banner");
+    const label = createElement("div", "ot-update-banner-text");
+    const icon = createElement("span", "ot-update-banner-icon");
+    try { setIcon(icon, "arrow-up-circle"); } catch (error) { icon.textContent = "⭑"; }
+    label.append(icon, createElement("span", "", `Task Deck ${info.version} is available.`));
+    const button = createElement("button", "mod-cta", "Update");
+    button.type = "button";
+    button.addEventListener("click", () => window.open(info.url, "_blank"));
+    banner.append(label, button);
+    return banner;
   }
 
   // Per-board, per-device view preference ("board" | "table"). Stored in data.json
@@ -4044,7 +4066,7 @@ module.exports = { TaskDeckSettingTab };
 
   },
   "src/plugin.js": function(module, exports, __require) {
-const { Notice, Plugin, addIcon } = require("obsidian");
+const { Notice, Plugin, addIcon, requestUrl } = require("obsidian");
 
 // Owns the Obsidian plugin lifecycle, saved board data, and Markdown card sync.
 const {
@@ -4144,6 +4166,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     }, 30000));
 
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
+    // Fire-and-forget update check (manual installs get no store prompt).
+    this.checkForUpdate();
     this.addCommand({
       id: "open-board",
       name: "Open board",
@@ -4605,6 +4629,45 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     } catch (error) {
       new Notice("Could not open Sync Deck.");
     }
+  }
+
+  // Task Deck is installed manually (not from the community store), so it can't
+  // get store update prompts. Check the GitHub releases once per session; if a
+  // newer version is out, the board view shows an "Update" banner. Fails silent
+  // (offline / rate-limited) — never blocks or nags.
+  async checkForUpdate() {
+    if (this._updateChecked) return;
+    this._updateChecked = true;
+    try {
+      const res = await requestUrl({
+        url: "https://api.github.com/repos/ismailivanov/task-deck/releases/latest",
+        headers: { Accept: "application/vnd.github+json" },
+        throw: false,
+      });
+      const body = res && res.json;
+      const latest = body && body.tag_name;
+      if (!latest || !this.isNewerVersion(latest, this.manifest.version)) return;
+      this.updateAvailable = {
+        version: String(latest).replace(/^v/, ""),
+        url: (body && body.html_url) || "https://github.com/ismailivanov/task-deck/releases/latest",
+      };
+      this.refreshViews();
+    } catch (error) {
+      // offline or GitHub rate-limited — just don't show a banner
+    }
+  }
+
+  isNewerVersion(candidate, current) {
+    const parts = (value) => String(value || "0").replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
+    const a = parts(candidate);
+    const b = parts(current);
+    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+      const x = a[i] || 0;
+      const y = b[i] || 0;
+      if (x > y) return true;
+      if (x < y) return false;
+    }
+    return false;
   }
 
   // Free Sync Deck accounts can only sync a limited number of boards. The gate

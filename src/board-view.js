@@ -74,6 +74,11 @@ class BoardView extends ItemView {
     this.contentEl.addClass("ot-board-root");
     this.contentEl.classList.toggle("is-compact-labels", !!this.plugin.data.compactLabels);
 
+    // Update banner sits above everything (board home OR a board), so it shows
+    // before the user does anything.
+    const updateBanner = this.renderUpdateBanner();
+    if (updateBanner) this.contentEl.append(updateBanner);
+
     if (!board || this.showingBoardHome) {
       this.renderBoardHome();
       return;
@@ -117,6 +122,23 @@ class BoardView extends ItemView {
 
     this.contentEl.append(toolbar, scroller);
     this.startPresence(board);
+  }
+
+  // "Update available" banner shown at the top when a newer GitHub release exists
+  // (Task Deck is installed manually, so it gets no community-store prompt).
+  renderUpdateBanner() {
+    const info = this.plugin.updateAvailable;
+    if (!info) return null;
+    const banner = createElement("div", "ot-update-banner");
+    const label = createElement("div", "ot-update-banner-text");
+    const icon = createElement("span", "ot-update-banner-icon");
+    try { setIcon(icon, "arrow-up-circle"); } catch (error) { icon.textContent = "⭑"; }
+    label.append(icon, createElement("span", "", `Task Deck ${info.version} is available.`));
+    const button = createElement("button", "mod-cta", "Update");
+    button.type = "button";
+    button.addEventListener("click", () => window.open(info.url, "_blank"));
+    banner.append(label, button);
+    return banner;
   }
 
   // Per-board, per-device view preference ("board" | "table"). Stored in data.json

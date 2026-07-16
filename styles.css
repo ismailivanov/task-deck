@@ -2175,3 +2175,34 @@ body.ot-col-resizing {
   color: var(--text-muted);
   font-size: 0.9em;
 }
+
+/* "Update available" banner (manual installs get no store prompt) */
+.ot-update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 12px 2px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+}
+.ot-update-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9em;
+  color: var(--text-normal);
+}
+.ot-update-banner-icon {
+  display: inline-flex;
+  color: var(--interactive-accent);
+}
+.ot-update-banner-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.ot-update-banner button {
+  flex: 0 0 auto;
+}
