@@ -1514,7 +1514,7 @@
   position: relative;
 }
 .ot-inline-image img {
-  cursor: zoom-in;
+  cursor: default;
 }
 /* Copy-image chip: appears over the image on hover, top-right. */
 .ot-image-copy {

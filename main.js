@@ -1813,11 +1813,10 @@ class CardModal extends Modal {
             img.src = resolved.src;
             img.alt = resolved.name || "";
             img.loading = "lazy";
-            img.addEventListener("click", (event) => {
-              event.stopPropagation();
-              if (resolved.file) this.app.workspace.getLeaf(false).openFile(resolved.file);
-              else if (resolved.src) window.open(resolved.src, "_blank");
-            });
+            // No click action on the image itself — opening the underlying note
+            // on every stray click was irritating. The preview's click-to-edit
+            // guard already ignores images, so a click here simply does nothing;
+            // copying is the hover chip's job.
             wrap.append(img);
             // Hover chip: copy the image to the clipboard without entering edit
             // mode (and without opening the file).
