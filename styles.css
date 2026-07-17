@@ -1634,6 +1634,59 @@
   z-index: 3;
 }
 
+/* Grid chip: sits under the top-right chip (remove in the editor, copy in the
+   read view); opens the 2/3/4-columns menu for the surrounding image run. */
+.ot-image-grid-chip {
+  position: absolute;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  box-shadow: none;
+  z-index: 3;
+}
+.ot-inline-image:hover .ot-image-grid-chip,
+.ot-block-image:hover .ot-image-grid-chip {
+  opacity: 1;
+}
+.ot-image-grid-chip:hover {
+  background: rgba(0, 0, 0, 0.82);
+}
+.ot-image-grid-chip svg {
+  width: 15px;
+  height: 15px;
+}
+.ot-inline-image .ot-image-grid-chip {
+  top: 52px;
+}
+.ot-block-image .ot-image-grid-chip {
+  top: 44px;
+}
+
+/* Drag-to-move image blocks in the editor. */
+.ot-block-image[draggable="true"] {
+  cursor: grab;
+}
+.ot-block-image.is-dragging {
+  opacity: 0.5;
+}
+.ot-block-image.is-img-drop-before {
+  box-shadow: -3px 0 0 var(--interactive-accent);
+}
+.ot-block-image.is-img-drop-after {
+  box-shadow: 3px 0 0 var(--interactive-accent);
+}
+
 .ot-image-missing {
   color: var(--text-faint);
   font-style: italic;

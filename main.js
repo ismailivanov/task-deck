@@ -726,6 +726,7 @@ const {
   dateFromISO,
   dateRangeLabel,
   fieldDateLabel,
+  hasDragType,
   iconButton,
   imageRefsFromMarkdown,
   imageSizeFromMarkup,
@@ -897,6 +898,9 @@ function detailsHtmlToMd(root) {
   serializeChildren(root, parts);
   return parts.join("\n\n").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
+
+// Drag payload type for reordering image blocks inside the description editor.
+const IMG_BLOCK_DRAG_TYPE = "application/x-task-deck-image-block";
 
 // Pull image files out of a paste/drop DataTransfer (empty if none).
 function imageFilesFromTransfer(dt) {
@@ -2025,7 +2029,23 @@ class CardModal extends Modal {
       // keeps each image exactly where it was added, inline with the text.
       const body = createElement("div", "ot-details-body");
       preview.append(body);
-      this.splitDetailSegments(markdown).forEach((seg) => {
+      const segs = this.splitDetailSegments(markdown);
+      // Grid layout for the run of images around segIndex: writes an even column
+      // width into every embed of the run (descending offsets, so earlier
+      // splices can't shift later ones), saves, and re-renders.
+      const applyGridToSegRun = async (segIndex, columns) => {
+        const run = this.imageSegRun(segs, segIndex);
+        if (!run.length) return;
+        const width = columns ? this.gridColumnWidth(preview.clientWidth || 640, columns) : 0;
+        let source = this.localDetails;
+        [...run].sort((a, b) => b.start - a.start).forEach((s) => {
+          source = source.slice(0, s.start) + imageMarkupWithSize(s.markup, width) + source.slice(s.end);
+        });
+        this.localDetails = source;
+        await this.saveNow();
+        renderPreview();
+      };
+      segs.forEach((seg, segIndex) => {
         if (seg.type === "img") {
           const resolved = this.plugin.resolveCardImage(this.card, seg.target);
           const wrap = createElement("div", "ot-inline-image");
@@ -2073,6 +2093,23 @@ class CardModal extends Modal {
                   renderPreview();
                 },
               });
+              // Grid chip: lay the surrounding image run out as 2/3/4 columns.
+              const gridChip = iconButton("layout-grid", "Arrange images side by side", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const menu = new Menu();
+                [2, 3, 4].forEach((columns) => {
+                  menu.addItem((item) => item.setTitle(`${columns} side by side`).onClick(() => {
+                    applyGridToSegRun(segIndex, columns).catch(console.error);
+                  }));
+                });
+                menu.addItem((item) => item.setTitle("Full width").onClick(() => {
+                  applyGridToSegRun(segIndex, 0).catch(console.error);
+                }));
+                menu.showAtMouseEvent(event);
+              });
+              gridChip.classList.add("ot-image-grid-chip");
+              wrap.append(gridChip);
             }
           } else {
             wrap.append(createElement("span", "ot-image-missing", seg.target.split("/").pop() || "image"));
@@ -2290,6 +2327,35 @@ class CardModal extends Modal {
       }).open();
     };
 
+    // The run of consecutive image blocks around `index` (empty text slots
+    // between images don't break the run) — the group a grid layout applies to.
+    const imageRunAround = (index) => {
+      if (!blocks[index] || blocks[index].type !== "img") return [];
+      const isGap = (b) => b && b.type === "text" && !b.value.trim();
+      let start = index;
+      while (start - 1 >= 0) {
+        if (blocks[start - 1].type === "img") { start -= 1; continue; }
+        if (isGap(blocks[start - 1]) && start - 2 >= 0 && blocks[start - 2].type === "img") { start -= 2; continue; }
+        break;
+      }
+      const run = [];
+      for (let i = start; i < blocks.length; i += 1) {
+        if (blocks[i].type === "img") { run.push(blocks[i]); continue; }
+        if (isGap(blocks[i]) && blocks[i + 1] && blocks[i + 1].type === "img") continue;
+        break;
+      }
+      return run;
+    };
+
+    const applyGridToBlockRun = (index, columns) => {
+      const run = imageRunAround(index);
+      if (!run.length) return;
+      const width = columns ? this.gridColumnWidth(blocksHost.clientWidth || 640, columns) : 0;
+      run.forEach((b) => { b.markup = imageMarkupWithSize(b.markup, width); });
+      syncDraft();
+      renderBlocks();
+    };
+
     const renderBlocks = () => {
       blocksHost.replaceChildren();
       blocks.forEach((block, index) => {
@@ -2401,6 +2467,67 @@ class CardModal extends Modal {
         });
         remove.classList.add("ot-block-image-remove");
         wrap.append(remove);
+
+        // Grid chip: lay the surrounding image run out as 2/3/4 columns.
+        const gridChip = iconButton("layout-grid", "Arrange images side by side", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const menu = new Menu();
+          [2, 3, 4].forEach((columns) => {
+            menu.addItem((item) => item.setTitle(`${columns} side by side`).onClick(() => {
+              applyGridToBlockRun(blocks.indexOf(block), columns);
+            }));
+          });
+          menu.addItem((item) => item.setTitle("Full width").onClick(() => {
+            applyGridToBlockRun(blocks.indexOf(block), 0);
+          }));
+          menu.showAtMouseEvent(event);
+        });
+        gridChip.classList.add("ot-image-grid-chip");
+        wrap.append(gridChip);
+
+        // Move an image by dragging it: drop on another image's left/right half
+        // to land before/after it. Structure re-normalizes from the markdown so
+        // the text slots around images stay consistent after any move.
+        wrap.draggable = true;
+        wrap.addEventListener("dragstart", (event) => {
+          if (event.target.closest(".ot-img-resize, .ot-block-image-remove, .ot-image-grid-chip")) {
+            event.preventDefault();
+            return;
+          }
+          event.dataTransfer.setData(IMG_BLOCK_DRAG_TYPE, String(blocks.indexOf(block)));
+          event.dataTransfer.effectAllowed = "move";
+          wrap.classList.add("is-dragging");
+        });
+        wrap.addEventListener("dragend", () => wrap.classList.remove("is-dragging"));
+        wrap.addEventListener("dragover", (event) => {
+          if (!hasDragType(event, IMG_BLOCK_DRAG_TYPE)) return;
+          event.preventDefault();
+          const rect = wrap.getBoundingClientRect();
+          const before = event.clientX < rect.left + rect.width / 2;
+          wrap.classList.toggle("is-img-drop-before", before);
+          wrap.classList.toggle("is-img-drop-after", !before);
+        });
+        wrap.addEventListener("dragleave", () => wrap.classList.remove("is-img-drop-before", "is-img-drop-after"));
+        wrap.addEventListener("drop", (event) => {
+          if (!hasDragType(event, IMG_BLOCK_DRAG_TYPE)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const before = wrap.classList.contains("is-img-drop-before");
+          wrap.classList.remove("is-img-drop-before", "is-img-drop-after");
+          const fromIndex = parseInt(event.dataTransfer.getData(IMG_BLOCK_DRAG_TYPE), 10);
+          const dragged = blocks[fromIndex];
+          if (!dragged || dragged === block || dragged.type !== "img") return;
+          blocks.splice(fromIndex, 1);
+          let to = blocks.indexOf(block);
+          if (to === -1) return;
+          if (!before) to += 1;
+          blocks.splice(to, 0, dragged);
+          blocks = buildBlocks(joinBlocks());
+          syncDraft();
+          renderBlocks();
+        });
+
         blocksHost.append(wrap);
       });
     };
@@ -2661,6 +2788,32 @@ class CardModal extends Modal {
       img.style.width = `${width}px`;
       img.style.maxHeight = "none";
     }
+  }
+
+  // The run of consecutive image segments around `index` (whitespace-only text
+  // between images doesn't break the run) — the group a grid layout applies to.
+  imageSegRun(segs, index) {
+    if (!segs[index] || segs[index].type !== "img") return [];
+    const isGap = (s) => s && s.type === "md" && !s.text.trim();
+    let start = index;
+    while (start - 1 >= 0) {
+      if (segs[start - 1].type === "img") { start -= 1; continue; }
+      if (isGap(segs[start - 1]) && start - 2 >= 0 && segs[start - 2].type === "img") { start -= 2; continue; }
+      break;
+    }
+    const run = [];
+    for (let i = start; i < segs.length; i += 1) {
+      if (segs[i].type === "img") { run.push(segs[i]); continue; }
+      if (isGap(segs[i]) && segs[i + 1] && segs[i + 1].type === "img") continue;
+      break;
+    }
+    return run;
+  }
+
+  // Even column width for a K-across image grid inside a container.
+  gridColumnWidth(containerWidth, columns) {
+    const width = Math.floor((Math.max(320, containerWidth) - 28 - columns * 10) / columns);
+    return Math.max(100, width);
   }
 
   /**
