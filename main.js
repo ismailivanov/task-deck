@@ -2909,7 +2909,28 @@ class CardModal extends Modal {
 
       // Description: markdown via the shared converter; images inlined as data
       // URLs so the hidden window needs no access to the vault's app:// protocol.
+      // Consecutive images form a RUN (whitespace between embeds doesn't break
+      // it) and print as a flex row with PERCENTAGE widths derived from the
+      // stored px sizes (relative to the ~800px modal they were sized in). Raw
+      // px would overflow the narrower A4 content box and wrap the grid into a
+      // single column — percentages keep 2-across as 2-across on any page.
       const descriptionParts = [];
+      let imageRun = [];
+      const flushImageRun = () => {
+        if (!imageRun.length) return;
+        if (imageRun.length === 1) {
+          const only = imageRun[0];
+          const sizing = only.width ? ` style="width:${Math.min(only.width, 660)}px"` : "";
+          descriptionParts.push(`<img src="${only.src}"${sizing}>`);
+        } else {
+          const cells = imageRun.map((item) => {
+            const percent = Math.min(100, Math.max(12, Math.round(((item.width || 380) / 8) * 10) / 10));
+            return `<img src="${item.src}" style="width: calc(${percent}% - 8px)">`;
+          }).join("");
+          descriptionParts.push(`<div class="imgrow">${cells}</div>`);
+        }
+        imageRun = [];
+      };
       for (const seg of this.splitDetailSegments(this.currentDetailsText())) {
         if (seg.type === "img") {
           const resolved = this.plugin.resolveCardImage(card, seg.target);
@@ -2918,18 +2939,21 @@ class CardModal extends Modal {
               const bin = await this.app.vault.readBinary(resolved.file);
               const ext = (resolved.file.extension || "png").toLowerCase();
               const mime = ext === "svg" ? "image/svg+xml" : (ext === "jpg" ? "image/jpeg" : `image/${ext}`);
-              // Keep the note's stored width (print CSS still caps at page width).
-              const imgWidth = imageSizeFromMarkup(seg.markup);
-              const sizing = imgWidth ? ` style="width:${imgWidth}px"` : "";
-              descriptionParts.push(`<img src="data:${mime};base64,${arrayBufferToBase64(bin)}"${sizing}>`);
+              imageRun.push({
+                src: `data:${mime};base64,${arrayBufferToBase64(bin)}`,
+                width: imageSizeFromMarkup(seg.markup),
+              });
             } catch (error) {
               // unreadable image — skip it rather than fail the export
             }
           }
-        } else if (seg.text.trim()) {
-          descriptionParts.push(detailsMdToHtml(seg.text));
+          continue;
         }
+        if (!seg.text.trim()) continue; // whitespace gap — keep the image run going
+        flushImageRun();
+        descriptionParts.push(detailsMdToHtml(seg.text));
       }
+      flushImageRun();
 
       const labelsHtml = (this.localLabels || [])
         .map((label) => `<span class="pill" style="background:${esc(label.color || "#2f6fd6")}">${esc(label.name)}</span>`)
@@ -2954,6 +2978,8 @@ class CardModal extends Modal {
         .section { margin-top: 22px; }
         .section h2 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
         img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
+        .imgrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 10px 0; }
+        .imgrow img { margin: 0; }
         .chk { margin: 4px 0; }
         .box { margin-right: 7px; }
         .done { text-decoration: line-through; color: #98a2b3; }
