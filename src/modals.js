@@ -1546,6 +1546,29 @@ class CardModal extends Modal {
             refreshEmpty();
           });
           ce.addEventListener("focus", () => { activeText = { block, ce }; });
+          // Escape hatch for quotes and lists (Notion behavior): pressing Enter
+          // on an EMPTY line inside a blockquote or list item exits it and drops
+          // the caret into a normal paragraph below — otherwise contenteditable
+          // keeps every new line trapped inside the quote forever.
+          ce.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" || event.shiftKey) return;
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount || !selection.isCollapsed) return;
+            const anchor = selection.anchorNode;
+            if (!anchor || !ce.contains(anchor)) return;
+            const el = anchor.nodeType === 1 ? anchor : anchor.parentElement;
+            if (!el) return;
+            const listItem = el.closest("li");
+            const quote = el.closest("blockquote");
+            if (!listItem && !quote) return;
+            const line = listItem || el.closest("p, div") || quote;
+            if ((line.textContent || "").replace(/\u00a0/g, " ").trim()) return; // line has content — normal Enter
+            event.preventDefault();
+            document.execCommand("outdent");
+            block.value = detailsHtmlToMd(ce);
+            syncDraft();
+            refreshEmpty();
+          });
           ce.addEventListener("paste", (event) => {
             const images = imageFilesFromTransfer(event.clipboardData);
             if (images.length) {
