@@ -26,6 +26,136 @@ const {
   initials,
 } = require("./helpers");
 
+// ---- Markdown <-> HTML for the WYSIWYG description blocks ----
+// A deliberately SMALL, symmetric subset (paragraphs, line breaks, #-headings,
+// -/1. lists, > quotes, ---, **bold**, *italic*, `code`, [link](url)) so that
+// md -> html -> md round-trips bytes for everything these converters produce.
+// Unrecognized markdown stays literal text and survives untouched.
+function escapeDetailsHtml(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function inlineMdToHtml(text) {
+  let out = escapeDetailsHtml(text);
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
+  return out;
+}
+
+function detailsMdToHtml(markdown) {
+  const lines = String(markdown || "").split("\n");
+  const html = [];
+  let para = [];
+  const flushPara = () => {
+    if (para.length) html.push(`<p>${para.map(inlineMdToHtml).join("<br>")}</p>`);
+    para = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*$/.test(line)) { flushPara(); i += 1; continue; }
+    if (/^-{3,}\s*$/.test(line)) { flushPara(); html.push("<hr>"); i += 1; continue; }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flushPara();
+      const level = Math.min(heading[1].length, 6);
+      html.push(`<h${level}>${inlineMdToHtml(heading[2])}</h${level}>`);
+      i += 1;
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      flushPara();
+      const items = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(`<li>${inlineMdToHtml(lines[i].replace(/^[-*]\s+/, ""))}</li>`);
+        i += 1;
+      }
+      html.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    if (/^\d+[.)]\s+/.test(line)) {
+      flushPara();
+      const items = [];
+      while (i < lines.length && /^\d+[.)]\s+/.test(lines[i])) {
+        items.push(`<li>${inlineMdToHtml(lines[i].replace(/^\d+[.)]\s+/, ""))}</li>`);
+        i += 1;
+      }
+      html.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      flushPara();
+      const quoted = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoted.push(inlineMdToHtml(lines[i].replace(/^>\s?/, "")));
+        i += 1;
+      }
+      html.push(`<blockquote>${quoted.join("<br>")}</blockquote>`);
+      continue;
+    }
+    para.push(line);
+    i += 1;
+  }
+  flushPara();
+  return html.join("");
+}
+
+// Serialize a contenteditable's DOM back to the same markdown subset. Unknown
+// wrappers (span/font/...) are flattened to their text, so pasted styling can't
+// leak HTML into the note.
+function detailsHtmlToMd(root) {
+  const inline = (node) => {
+    let out = "";
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === 3) { out += child.textContent; return; }
+      if (child.nodeType !== 1) return;
+      const tag = child.tagName;
+      if (tag === "BR") { out += "\n"; return; }
+      const inner = inline(child);
+      if (tag === "B" || tag === "STRONG") out += inner.trim() ? `**${inner}**` : inner;
+      else if (tag === "I" || tag === "EM") out += inner.trim() ? `*${inner}*` : inner;
+      else if (tag === "CODE") out += inner.trim() ? `\`${inner}\`` : inner;
+      else if (tag === "A") out += `[${inner || child.getAttribute("href") || "link"}](${child.getAttribute("href") || ""})`;
+      else out += inner;
+    });
+    return out;
+  };
+  const parts = [];
+  root.childNodes.forEach((child) => {
+    if (child.nodeType === 3) {
+      if (child.textContent.trim()) parts.push(child.textContent);
+      return;
+    }
+    if (child.nodeType !== 1) return;
+    const tag = child.tagName;
+    if (/^H[1-6]$/.test(tag)) { parts.push(`${"#".repeat(Number(tag[1]))} ${inline(child)}`); return; }
+    if (tag === "UL" || tag === "OL") {
+      const out = [];
+      let n = 1;
+      child.querySelectorAll(":scope > li").forEach((li) => {
+        out.push(tag === "UL" ? `- ${inline(li)}` : `${n++}. ${inline(li)}`);
+      });
+      parts.push(out.join("\n"));
+      return;
+    }
+    if (tag === "BLOCKQUOTE") {
+      parts.push(inline(child).split("\n").map((l) => `> ${l}`).join("\n"));
+      return;
+    }
+    if (tag === "HR") { parts.push("---"); return; }
+    if (tag === "P" || tag === "DIV") {
+      const text = inline(child);
+      if (text.trim()) parts.push(text);
+      return;
+    }
+    const text = inline({ childNodes: [child] });
+    if (text.trim()) parts.push(text);
+  });
+  return parts.join("\n\n").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // Pull image files out of a paste/drop DataTransfer (empty if none).
 function imageFilesFromTransfer(dt) {
   if (!dt) return [];
@@ -1240,6 +1370,13 @@ class CardModal extends Modal {
       renderPreview();
     };
 
+    // Toolbar buttons must not steal focus from the contenteditable on mousedown,
+    // or the user's selection collapses before the command can format it.
+    const keepEditorSelection = (button) => {
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      return button;
+    };
+
     const makeTool = (icon, label, onClick) => {
       const button = iconButton(icon, label, (event) => {
         event.preventDefault();
@@ -1247,7 +1384,7 @@ class CardModal extends Modal {
         onClick();
       });
       button.classList.add("ot-details-tool");
-      return button;
+      return keepEditorSelection(button);
     };
 
     const makeTextTool = (label, title, onClick) => {
@@ -1260,18 +1397,19 @@ class CardModal extends Modal {
         event.stopPropagation();
         onClick();
       });
-      return button;
+      return keepEditorSelection(button);
     };
 
-    // ---- Block editor (Notion/Trello-style) ----
-    // Editing splits the markdown into TEXT blocks (borderless auto-growing
-    // textareas) and IMAGE blocks (real thumbnails with a remove chip), so the
-    // user never sees raw ![[...]] markup. `blocks` is the source of truth while
-    // editing; syncDraft() re-joins it into markdown and mirrors it into the
-    // hidden master textarea (`editor`) that saveDetails/saveNow already read.
+    // ---- Block editor (Notion/Trello-style WYSIWYG) ----
+    // Editing splits the markdown into TEXT blocks (contenteditable surfaces
+    // where bold/italic/lists render LIVE) and IMAGE blocks (real thumbnails
+    // with a remove chip) — the user never sees raw markdown markers. `blocks`
+    // is the source of truth while editing; each input serializes its block back
+    // to markdown (detailsHtmlToMd) and syncDraft() re-joins the whole note into
+    // the hidden master textarea (`editor`) that saveDetails/saveNow already read.
     const blocksHost = createElement("div", "ot-block-editor");
     let blocks = [];
-    let activeText = null; // { block, ta } of the focused text block
+    let activeText = null; // { block, ce } of the focused text block
 
     const buildBlocks = (markdown) => {
       const built = [];
@@ -1310,84 +1448,112 @@ class CardModal extends Modal {
       editor.value = this.detailsDraft;
     };
 
-    const autosize = (ta) => {
-      ta.style.height = "auto";
-      ta.style.height = `${Math.max(ta.scrollHeight, 30)}px`;
+    const placeCaret = (ce, atStart) => {
+      ce.focus();
+      const range = document.createRange();
+      range.selectNodeContents(ce);
+      range.collapse(!!atStart);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
     };
 
     const focusedText = () => {
-      if (activeText && blocks.includes(activeText.block) && activeText.ta && activeText.ta.isConnected) return activeText;
+      if (activeText && blocks.includes(activeText.block) && activeText.ce && activeText.ce.isConnected) return activeText;
       for (let i = blocks.length - 1; i >= 0; i -= 1) {
-        if (blocks[i].type === "text" && blocks[i]._ta) return { block: blocks[i], ta: blocks[i]._ta };
+        if (blocks[i].type === "text" && blocks[i]._ce) return { block: blocks[i], ce: blocks[i]._ce };
       }
       return null;
     };
 
-    const setBlockText = (t, value, start, end) => {
-      t.ta.value = value;
-      t.block.value = value;
+    const syncBlockFromDom = (t) => {
+      t.block.value = detailsHtmlToMd(t.ce);
       syncDraft();
-      autosize(t.ta);
-      t.ta.focus();
-      t.ta.selectionStart = start;
-      t.ta.selectionEnd = end;
     };
 
-    const wrapSelection = (before, after, placeholder) => {
+    // Toolbar commands run against the focused contenteditable via execCommand,
+    // so bold/italic/lists render LIVE in the editor (and Enter continues a
+    // list natively) instead of inserting raw markdown markers.
+    const runCommand = (mutate) => {
       const t = focusedText();
       if (!t) return;
-      const start = t.ta.selectionStart || 0;
-      const end = t.ta.selectionEnd || start;
-      const selected = t.ta.value.slice(start, end) || placeholder;
-      const next = t.ta.value.slice(0, start) + before + selected + after + t.ta.value.slice(end);
-      setBlockText(t, next, start + before.length, start + before.length + selected.length);
+      t.ce.focus();
+      mutate(t);
+      syncBlockFromDom(t);
     };
-
-    const prefixLines = (prefix) => {
+    const execCmd = (command, value) => runCommand(() => document.execCommand(command, false, value || null));
+    const toggleBlockFormat = (tag) => runCommand(() => {
+      const current = String(document.queryCommandValue("formatBlock") || "").toLowerCase();
+      document.execCommand("formatBlock", false, current === tag ? "p" : tag);
+    });
+    const wrapCode = () => runCommand(() => {
+      const selection = window.getSelection();
+      if (!selection || !selection.rangeCount || selection.isCollapsed) {
+        document.execCommand("insertText", false, "`code`");
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      try {
+        range.surroundContents(document.createElement("code"));
+      } catch (error) {
+        document.execCommand("insertText", false, `\`${selection.toString()}\``);
+      }
+    });
+    const insertLink = () => {
       const t = focusedText();
       if (!t) return;
-      const start = t.ta.selectionStart || 0;
-      const end = t.ta.selectionEnd || start;
-      const lineStart = t.ta.value.lastIndexOf("\n", start - 1) + 1;
-      const lineEndIndex = t.ta.value.indexOf("\n", end);
-      const lineEnd = lineEndIndex === -1 ? t.ta.value.length : lineEndIndex;
-      const block = t.ta.value.slice(lineStart, lineEnd) || "";
-      const nextBlock = block.split("\n").map((line) => (line.startsWith(prefix) ? line : `${prefix}${line || " "}`)).join("\n");
-      const next = t.ta.value.slice(0, lineStart) + nextBlock + t.ta.value.slice(lineEnd);
-      setBlockText(t, next, lineStart, lineStart + nextBlock.length);
-    };
-
-    const insertBlock = (text) => {
-      const t = focusedText();
-      if (!t) return;
-      const start = typeof t.ta.selectionStart === "number" ? t.ta.selectionStart : t.ta.value.length;
-      const end = typeof t.ta.selectionEnd === "number" ? t.ta.selectionEnd : start;
-      const before = t.ta.value.slice(0, start);
-      const after = t.ta.value.slice(end);
-      const prefix = before && !before.endsWith("\n") ? "\n" : "";
-      const suffix = after && !after.startsWith("\n") ? "\n" : "";
-      const inserted = `${prefix}${text}${suffix}`;
-      setBlockText(t, before + inserted + after, start + inserted.length, start + inserted.length);
+      const selection = window.getSelection();
+      const hasSelection = !!(selection && selection.rangeCount && !selection.isCollapsed && t.ce.contains(selection.anchorNode));
+      const savedRange = hasSelection ? selection.getRangeAt(0).cloneRange() : null;
+      new TextPromptModal(this.app, "Link", "https://...", "https://", (url) => {
+        const target = textLine(url);
+        if (!target || target === "https://") return;
+        t.ce.focus();
+        if (savedRange) {
+          const restore = window.getSelection();
+          restore.removeAllRanges();
+          restore.addRange(savedRange);
+          document.execCommand("createLink", false, target);
+        } else {
+          document.execCommand("insertHTML", false, `<a href="${escapeDetailsHtml(target)}">${escapeDetailsHtml(target)}</a>`);
+        }
+        syncBlockFromDom(t);
+      }).open();
     };
 
     const renderBlocks = () => {
       blocksHost.replaceChildren();
       blocks.forEach((block, index) => {
         if (block.type === "text") {
-          const ta = createElement("textarea", "ot-block-text");
-          ta.value = block.value;
-          ta.rows = 1;
-          if (index === 0) ta.placeholder = blocks.length === 1 ? "Write a description..." : "";
-          ta.addEventListener("input", () => {
-            block.value = ta.value;
+          // A real WYSIWYG surface: markdown renders as formatted content and
+          // serializes back on every input — the user never sees the markers.
+          const ce = createElement("div", "ot-block-text");
+          ce.contentEditable = "true";
+          ce.spellcheck = true;
+          ce.innerHTML = detailsMdToHtml(block.value);
+          if (index === 0 && blocks.length === 1) ce.dataset.placeholder = "Write a description...";
+          const refreshEmpty = () => { ce.dataset.empty = ce.textContent.trim() ? "false" : "true"; };
+          refreshEmpty();
+          ce.addEventListener("input", () => {
+            block.value = detailsHtmlToMd(ce);
             syncDraft();
-            autosize(ta);
+            refreshEmpty();
           });
-          ta.addEventListener("focus", () => { activeText = { block, ta }; });
-          ta.addEventListener("paste", handlePaste);
-          block._ta = ta;
-          blocksHost.append(ta);
-          requestAnimationFrame(() => autosize(ta));
+          ce.addEventListener("focus", () => { activeText = { block, ce }; });
+          ce.addEventListener("paste", (event) => {
+            const images = imageFilesFromTransfer(event.clipboardData);
+            if (images.length) {
+              event.preventDefault();
+              insertImagesSequentially(images).catch(console.error);
+              return;
+            }
+            // Paste as plain text so foreign HTML styling can't leak into the note.
+            const text = event.clipboardData ? event.clipboardData.getData("text/plain") : "";
+            event.preventDefault();
+            if (text) document.execCommand("insertText", false, text);
+          });
+          block._ce = ce;
+          blocksHost.append(ce);
           return;
         }
         const wrap = createElement("div", "ot-block-image");
@@ -1426,10 +1592,7 @@ class CardModal extends Modal {
     blocksHost.addEventListener("click", (event) => {
       if (event.target !== blocksHost) return;
       const t = focusedText();
-      if (t && t.ta) {
-        t.ta.focus();
-        t.ta.selectionStart = t.ta.selectionEnd = t.ta.value.length;
-      }
+      if (t && t.ce) placeCaret(t.ce, false);
     });
 
     // Paste or drop an image straight into the notes: it's saved into the vault
@@ -1474,21 +1637,21 @@ class CardModal extends Modal {
       const toolbar = createElement("div", "ot-details-toolbar");
       const leftTools = createElement("div", "ot-details-toolbar-group");
       leftTools.append(
-        makeTextTool("Tt", "Heading", () => prefixLines("### ")),
-        makeTextTool("B", "Bold", () => wrapSelection("**", "**", "bold text")),
-        makeTextTool("I", "Italic", () => wrapSelection("*", "*", "italic text")),
-        makeTool("ellipsis", "More", () => insertBlock("> ")),
-        makeTool("list", "List", () => prefixLines("- ")),
-        makeTool("link", "Link", () => wrapSelection("[", "](https://)", "link")),
+        makeTextTool("Tt", "Heading", () => toggleBlockFormat("h3")),
+        makeTextTool("B", "Bold", () => execCmd("bold")),
+        makeTextTool("I", "Italic", () => execCmd("italic")),
+        makeTool("ellipsis", "Quote", () => toggleBlockFormat("blockquote")),
+        makeTool("list", "Bulleted list", () => execCmd("insertUnorderedList")),
+        makeTool("link", "Link", insertLink),
         makeTool("image", "Add image", () => imageInput.click()),
-        makeTool("plus", "Divider", () => insertBlock("---"))
+        makeTool("plus", "Divider", () => execCmd("insertHorizontalRule"))
       );
 
       const rightTools = createElement("div", "ot-details-toolbar-group");
       rightTools.append(
         makeTool("paperclip", "Attach image", () => imageInput.click()),
-        makeTextTool("M", "Markdown", () => wrapSelection("`", "`", "code")),
-        makeTool("help-circle", "Formatting help", () => new Notice("Markdown: **bold**, *italic*, - list, [link](url)."))
+        makeTextTool("M", "Code", wrapCode),
+        makeTool("help-circle", "Formatting help", () => new Notice("Select text, then use the toolbar — formatting shows live in the editor."))
       );
       toolbar.append(leftTools, rightTools);
 
@@ -1505,11 +1668,28 @@ class CardModal extends Modal {
       this.insertDetailAtCaret = (markup) => {
         const t = focusedText();
         if (!t) return false;
-        const caret = typeof t.ta.selectionStart === "number" ? t.ta.selectionStart : t.ta.value.length;
-        const beforeText = t.ta.value.slice(0, caret);
-        const afterText = t.ta.value.slice(caret);
         const at = blocks.indexOf(t.block);
         if (at === -1) return false;
+        // Split the focused contenteditable at the caret: serialize what's
+        // before and after it, so the image lands exactly where you're typing.
+        let beforeText = t.block.value;
+        let afterText = "";
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount && t.ce.contains(selection.anchorNode)) {
+          const range = selection.getRangeAt(0);
+          const beforeRange = document.createRange();
+          beforeRange.selectNodeContents(t.ce);
+          beforeRange.setEnd(range.startContainer, range.startOffset);
+          const afterRange = document.createRange();
+          afterRange.selectNodeContents(t.ce);
+          afterRange.setStart(range.endContainer, range.endOffset);
+          const beforeHost = document.createElement("div");
+          beforeHost.append(beforeRange.cloneContents());
+          const afterHost = document.createElement("div");
+          afterHost.append(afterRange.cloneContents());
+          beforeText = detailsHtmlToMd(beforeHost);
+          afterText = detailsHtmlToMd(afterHost);
+        }
         const seg = this.splitDetailSegments(markup).find((s) => s.type === "img");
         blocks.splice(
           at,
@@ -1522,10 +1702,7 @@ class CardModal extends Modal {
         renderBlocks();
         const nextBlock = blocks[at + 2];
         requestAnimationFrame(() => {
-          if (nextBlock && nextBlock._ta) {
-            nextBlock._ta.focus();
-            nextBlock._ta.selectionStart = nextBlock._ta.selectionEnd = 0;
-          }
+          if (nextBlock && nextBlock._ce) placeCaret(nextBlock._ce, true);
         });
         return true;
       };
@@ -1545,11 +1722,10 @@ class CardModal extends Modal {
       editorFrame.append(toolbar, blocksHost);
       field.append(header, editorFrame, actions, imageInput, editor);
       requestAnimationFrame(() => {
+        // Enter should produce clean <p> paragraphs (matches the serializer).
+        try { document.execCommand("defaultParagraphSeparator", false, "p"); } catch (error) { /* older engines */ }
         const t = focusedText();
-        if (t && t.ta) {
-          t.ta.focus();
-          t.ta.selectionStart = t.ta.selectionEnd = t.ta.value.length;
-        }
+        if (t && t.ce) placeCaret(t.ce, false);
       });
       return field;
     }

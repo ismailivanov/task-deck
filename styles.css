@@ -2258,21 +2258,76 @@ body.ot-col-resizing {
   cursor: text;
 }
 .ot-block-text {
+  position: relative;
   width: 100%;
   min-height: 30px;
   padding: 2px 0;
   border: none !important;
   background: transparent !important;
   box-shadow: none !important;
-  resize: none;
-  overflow: hidden;
   color: var(--text-normal);
   font-family: inherit;
   font-size: 14px;
   line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .ot-block-text:focus {
-  outline: none;
+  outline: none !important;
+  box-shadow: none !important;
+}
+.ot-block-text[data-empty="true"][data-placeholder]::before {
+  content: attr(data-placeholder);
+  color: var(--text-faint);
+  pointer-events: none;
+  position: absolute;
+}
+/* Formatted content INSIDE the editable surface (live WYSIWYG). */
+.ot-block-text p {
+  margin: 0 0 0.45em;
+}
+.ot-block-text p:last-child {
+  margin-bottom: 0;
+}
+.ot-block-text ul,
+.ot-block-text ol {
+  margin: 0.25em 0;
+  padding-inline-start: 1.5em;
+}
+.ot-block-text li {
+  margin: 0.1em 0;
+}
+.ot-block-text h1,
+.ot-block-text h2,
+.ot-block-text h3,
+.ot-block-text h4,
+.ot-block-text h5,
+.ot-block-text h6 {
+  margin: 0.5em 0 0.25em;
+  font-weight: 700;
+}
+.ot-block-text h3 {
+  font-size: 1.12em;
+}
+.ot-block-text blockquote {
+  margin: 0.35em 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.ot-block-text hr {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ot-block-text code {
+  background: var(--background-modifier-border);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.ot-block-text a {
+  color: var(--interactive-accent);
 }
 .ot-block-image {
   position: relative;
