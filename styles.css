@@ -1461,16 +1461,57 @@
   padding: 10px 14px;
   background: var(--background-primary);
   color: var(--text-normal);
-  cursor: default;
+  /* Click-to-edit + copy-friendly: text caret signals both "select me" and
+     "click to type"; selectable so text can be copied without entering edit. */
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
   font-size: 14px;
   font-weight: 400;
   line-height: 1.45;
+}
+.ot-card-modal .ot-markdown-preview:hover {
+  border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
 }
 
 .ot-markdown-preview ul,
 .ot-markdown-preview ol {
   margin-block: 0.4em;
   padding-inline-start: 1.5em;
+}
+
+/* Read-view parity with the WYSIWYG editor: Obsidian scopes its own markdown
+   styles to its views, so quotes/code/rules rendered in this modal preview get
+   NO styling from the theme — a "> quote" looked like plain text in read mode
+   while showing a proper quote bar in edit mode. Mirror the editor's styles. */
+.ot-markdown-preview blockquote {
+  margin: 0.35em 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.ot-markdown-preview code {
+  background: var(--background-modifier-border);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.ot-markdown-preview hr {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ot-markdown-preview h1,
+.ot-markdown-preview h2,
+.ot-markdown-preview h3,
+.ot-markdown-preview h4,
+.ot-markdown-preview h5,
+.ot-markdown-preview h6 {
+  margin: 0.5em 0 0.25em;
+  font-weight: 700;
+}
+.ot-markdown-preview h3 {
+  font-size: 1.12em;
 }
 
 /* Inline images: fill the description width, keep aspect, sensible height —
@@ -1510,8 +1551,147 @@
   text-decoration: underline;
 }
 
+.ot-inline-image {
+  position: relative;
+  /* Flow side by side: consecutive images wrap like a grid once resized down. */
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+  margin: 4px 8px 4px 0;
+}
 .ot-inline-image img {
-  cursor: zoom-in;
+  cursor: default;
+  margin: 0;
+}
+/* Copy-image chip: appears over the image on hover, top-right. */
+.ot-image-copy {
+  position: absolute;
+  top: 16px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  box-shadow: none;
+  z-index: 2;
+}
+.ot-inline-image:hover .ot-image-copy {
+  opacity: 1;
+}
+.ot-image-copy:hover {
+  background: rgba(0, 0, 0, 0.82);
+}
+.ot-image-copy svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Resize grip: Notion-style bar on the image's right edge (hover to reveal,
+   always visible while dragging and on touch screens). */
+.ot-img-resize {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 44px;
+  max-height: 45%;
+  padding: 0;
+  border-radius: 4px;
+  background: rgba(15, 15, 15, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 3;
+  touch-action: none;
+}
+.ot-inline-image:hover .ot-img-resize,
+.ot-block-image:hover .ot-img-resize,
+.ot-img-resize.is-dragging {
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  .ot-img-resize {
+    opacity: 0.85;
+  }
+}
+/* Live width readout while dragging. */
+.ot-img-size-chip {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* Grid chip: sits under the top-right chip (remove in the editor, copy in the
+   read view); opens the 2/3/4-columns menu for the surrounding image run. */
+.ot-image-grid-chip {
+  position: absolute;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  box-shadow: none;
+  z-index: 3;
+}
+.ot-inline-image:hover .ot-image-grid-chip,
+.ot-block-image:hover .ot-image-grid-chip {
+  opacity: 1;
+}
+.ot-image-grid-chip:hover {
+  background: rgba(0, 0, 0, 0.82);
+}
+.ot-image-grid-chip svg {
+  width: 15px;
+  height: 15px;
+}
+.ot-inline-image .ot-image-grid-chip {
+  top: 52px;
+}
+.ot-block-image .ot-image-grid-chip {
+  top: 44px;
+}
+
+/* Drag-to-move image blocks in the editor. */
+.ot-block-image[draggable="true"] {
+  cursor: grab;
+}
+.ot-block-image.is-dragging {
+  opacity: 0.5;
+}
+.ot-block-image.is-img-drop-before {
+  box-shadow: -3px 0 0 var(--interactive-accent);
+}
+.ot-block-image.is-img-drop-after {
+  box-shadow: 3px 0 0 var(--interactive-accent);
 }
 
 .ot-image-missing {
@@ -2253,4 +2433,140 @@ body.ot-col-resizing {
 }
 .ot-update-banner button {
   flex: 0 0 auto;
+}
+
+/* ---- Description block editor (Notion/Trello-style) ---- */
+.ot-block-editor {
+  /* Block flow (not flex): image blocks are inline-block, so consecutive
+     images sit side by side and wrap like a grid once resized down. */
+  display: block;
+  min-height: 170px;
+  padding: 10px 12px 14px;
+  cursor: text;
+}
+.ot-block-text {
+  position: relative;
+  width: 100%;
+  min-height: 30px;
+  padding: 2px 0;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--text-normal);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Empty text slot between two images: a slim clickable strip that keeps the
+   images side by side; typing expands it back to a full row. */
+.ot-block-text--slim {
+  display: inline-block;
+  width: auto;
+  min-width: 12px;
+  vertical-align: top;
+}
+.ot-block-text:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+.ot-block-text[data-empty="true"][data-placeholder]::before {
+  content: attr(data-placeholder);
+  color: var(--text-faint);
+  pointer-events: none;
+  position: absolute;
+}
+/* Formatted content INSIDE the editable surface (live WYSIWYG). */
+.ot-block-text p {
+  margin: 0 0 0.45em;
+}
+.ot-block-text p:last-child {
+  margin-bottom: 0;
+}
+.ot-block-text ul,
+.ot-block-text ol {
+  margin: 0.25em 0;
+  padding-inline-start: 1.5em;
+}
+.ot-block-text li {
+  margin: 0.1em 0;
+}
+.ot-block-text h1,
+.ot-block-text h2,
+.ot-block-text h3,
+.ot-block-text h4,
+.ot-block-text h5,
+.ot-block-text h6 {
+  margin: 0.5em 0 0.25em;
+  font-weight: 700;
+}
+.ot-block-text h3 {
+  font-size: 1.12em;
+}
+.ot-block-text blockquote {
+  margin: 0.35em 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.ot-block-text hr {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ot-block-text code {
+  background: var(--background-modifier-border);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.ot-block-text a {
+  color: var(--interactive-accent);
+}
+.ot-block-image {
+  position: relative;
+  display: inline-block;
+  vertical-align: top;
+  margin: 4px 8px 4px 0;
+  max-width: 100%;
+}
+.ot-block-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 340px;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  object-fit: contain;
+}
+.ot-block-image-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  box-shadow: none;
+  z-index: 2;
+}
+.ot-block-image:hover .ot-block-image-remove {
+  opacity: 1;
+}
+.ot-block-image-remove:hover {
+  background: rgba(200, 40, 40, 0.85);
+}
+.ot-block-image-remove svg {
+  width: 15px;
+  height: 15px;
 }

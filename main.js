@@ -207,6 +207,52 @@ function stripImageEmbeds(markdown) {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Resizable embeds store their width in Obsidian's own image-size syntax:
+// ![[img.png|300]] for wiki embeds, ![alt|300](url) for markdown embeds — so a
+// resized card image renders at the same width when the note opens in Obsidian.
+const IMAGE_SIZE_RE = /^(\d+)(x\d+)?$/i;
+
+// Width (px) stored in an image embed's markup, or null when unsized.
+function imageSizeFromMarkup(markup) {
+  const text = String(markup || "");
+  let candidate = null;
+  const wiki = text.match(/^!\[\[([^\]]+)\]\]$/);
+  if (wiki) {
+    const parts = wiki[1].split("|");
+    if (parts.length > 1) candidate = parts[parts.length - 1];
+  } else {
+    const md = text.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    if (md) candidate = md[1].split("|").pop();
+  }
+  if (!candidate) return null;
+  const match = candidate.trim().match(IMAGE_SIZE_RE);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+// Returns the embed markup with its size segment set to `width` px; a falsy
+// width clears the size so the image renders at its natural/full width. Only
+// a trailing size-like segment is touched — aliases and titles survive.
+function imageMarkupWithSize(markup, width) {
+  const text = String(markup || "");
+  const size = width > 0 ? String(Math.round(width)) : "";
+  const wiki = text.match(/^!\[\[([^\]]+)\]\]$/);
+  if (wiki) {
+    const parts = wiki[1].split("|");
+    if (parts.length > 1 && IMAGE_SIZE_RE.test(parts[parts.length - 1].trim())) parts.pop();
+    if (size) parts.push(size);
+    return `![[${parts.join("|")}]]`;
+  }
+  const md = text.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+  if (md) {
+    const parts = md[1].split("|");
+    if (IMAGE_SIZE_RE.test(parts[parts.length - 1].trim())) parts.pop();
+    const alt = parts.join("|").trim();
+    const sized = size ? (alt ? `${alt}|${size}` : size) : alt;
+    return `![${sized}](${md[2]})`;
+  }
+  return text;
+}
+
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -637,6 +683,8 @@ module.exports = {
   isImagePath,
   imageRefsFromMarkdown,
   stripImageEmbeds,
+  imageSizeFromMarkup,
+  imageMarkupWithSize,
   createElement,
   hasDragType,
   iconButton,
@@ -660,7 +708,7 @@ module.exports = {
 
   },
   "src/modals.js": function(module, exports, __require) {
-const { MarkdownRenderer, Menu, Modal, Notice, setIcon } = require("obsidian");
+const { MarkdownRenderer, Menu, Modal, Notice, arrayBufferToBase64, setIcon } = require("obsidian");
 
 // Modal UIs for cards, labels, dates, prompts, and the short about panel.
 const {
@@ -677,9 +725,13 @@ const {
   clone,
   createElement,
   dateFromISO,
+  dateRangeLabel,
   fieldDateLabel,
+  hasDragType,
   iconButton,
   imageRefsFromMarkdown,
+  imageSizeFromMarkup,
+  imageMarkupWithSize,
   isoFromDate,
   labelKey,
   stripImageEmbeds,
@@ -687,6 +739,169 @@ const {
   textLine,
   initials,
 } = __require("src/helpers.js");
+
+// ---- Markdown <-> HTML for the WYSIWYG description blocks ----
+// A deliberately SMALL, symmetric subset (paragraphs, line breaks, #-headings,
+// -/1. lists, > quotes, ---, **bold**, *italic*, `code`, [link](url)) so that
+// md -> html -> md round-trips bytes for everything these converters produce.
+// Unrecognized markdown stays literal text and survives untouched.
+function escapeDetailsHtml(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function inlineMdToHtml(text) {
+  let out = escapeDetailsHtml(text);
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
+  return out;
+}
+
+function detailsMdToHtml(markdown) {
+  const lines = String(markdown || "").split("\n");
+  const html = [];
+  let para = [];
+  const flushPara = () => {
+    if (para.length) html.push(`<p>${para.map(inlineMdToHtml).join("<br>")}</p>`);
+    para = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*$/.test(line)) { flushPara(); i += 1; continue; }
+    if (/^-{3,}\s*$/.test(line)) { flushPara(); html.push("<hr>"); i += 1; continue; }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flushPara();
+      const level = Math.min(heading[1].length, 6);
+      html.push(`<h${level}>${inlineMdToHtml(heading[2])}</h${level}>`);
+      i += 1;
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      flushPara();
+      const items = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(`<li>${inlineMdToHtml(lines[i].replace(/^[-*]\s+/, ""))}</li>`);
+        i += 1;
+      }
+      html.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    if (/^\d+[.)]\s+/.test(line)) {
+      flushPara();
+      const items = [];
+      while (i < lines.length && /^\d+[.)]\s+/.test(lines[i])) {
+        items.push(`<li>${inlineMdToHtml(lines[i].replace(/^\d+[.)]\s+/, ""))}</li>`);
+        i += 1;
+      }
+      html.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      flushPara();
+      const quoted = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoted.push(inlineMdToHtml(lines[i].replace(/^>\s?/, "")));
+        i += 1;
+      }
+      // One <p> per quoted line (empty lines keep a <br> so they hold a caret):
+      // per-line wrappers are what lets the editor's Enter-on-empty-line escape
+      // detect the current line inside the quote.
+      html.push(`<blockquote>${quoted.map((q) => `<p>${q || "<br>"}</p>`).join("")}</blockquote>`);
+      continue;
+    }
+    para.push(line);
+    i += 1;
+  }
+  flushPara();
+  return html.join("");
+}
+
+// Serialize a contenteditable's DOM back to the same markdown subset. Unknown
+// wrappers (span/font/...) are flattened to their text, so pasted styling can't
+// leak HTML into the note.
+function detailsHtmlToMd(root) {
+  const BLOCK_TAGS = /^(P|DIV|UL|OL|BLOCKQUOTE|HR|H[1-6])$/;
+  const inline = (node) => {
+    let out = "";
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === 3) { out += child.textContent; return; }
+      if (child.nodeType !== 1) return;
+      const tag = child.tagName;
+      if (tag === "BR") { out += "\n"; return; }
+      const inner = inline(child);
+      if (tag === "B" || tag === "STRONG") out += inner.trim() ? `**${inner}**` : inner;
+      else if (tag === "I" || tag === "EM") out += inner.trim() ? `*${inner}*` : inner;
+      else if (tag === "CODE") out += inner.trim() ? `\`${inner}\`` : inner;
+      else if (tag === "A") out += `[${inner || child.getAttribute("href") || "link"}](${child.getAttribute("href") || ""})`;
+      else out += inner;
+    });
+    return out;
+  };
+  // Chromium freely nests blocks (a <ul> inside the caret's <p>, a quote inside
+  // a <div>...), so serialization must RECURSE into containers — flattening a
+  // wrapped list through inline() used to glue every item into one word.
+  const serializeChildren = (node, parts) => {
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === 3) {
+        if (child.textContent.trim()) parts.push(child.textContent);
+        return;
+      }
+      if (child.nodeType !== 1) return;
+      if (BLOCK_TAGS.test(child.tagName)) serializeBlock(child, parts);
+      else {
+        const text = inline({ childNodes: [child] });
+        if (text.trim()) parts.push(text);
+      }
+    });
+  };
+  const serializeBlock = (el, parts) => {
+    const tag = el.tagName;
+    if (/^H[1-6]$/.test(tag)) {
+      parts.push(`${"#".repeat(Number(tag[1]))} ${inline(el)}`);
+      return;
+    }
+    if (tag === "UL" || tag === "OL") {
+      const lines = [];
+      let n = 1;
+      el.querySelectorAll(":scope > li").forEach((li) => {
+        const nestedBlocks = Array.from(li.children).filter((c) => BLOCK_TAGS.test(c.tagName));
+        const inlineOnly = { childNodes: Array.from(li.childNodes).filter((c) => !(c.nodeType === 1 && BLOCK_TAGS.test(c.tagName))) };
+        lines.push(tag === "UL" ? `- ${inline(inlineOnly)}` : `${n++}. ${inline(inlineOnly)}`);
+        // Nested lists/blocks inside an item flatten to sibling lines.
+        nestedBlocks.forEach((nested) => {
+          const sub = [];
+          serializeBlock(nested, sub);
+          sub.forEach((line) => lines.push(line));
+        });
+      });
+      parts.push(lines.join("\n"));
+      return;
+    }
+    if (tag === "BLOCKQUOTE") {
+      const sub = [];
+      serializeChildren(el, sub);
+      const flat = sub.length ? sub.join("\n") : inline(el);
+      parts.push(flat.split("\n").map((l) => `> ${l}`).join("\n"));
+      return;
+    }
+    if (tag === "HR") { parts.push("---"); return; }
+    // P/DIV: a real paragraph when it only holds inline content; a transparent
+    // container when Chromium nested block elements inside it.
+    const hasBlockChild = Array.from(el.children || []).some((c) => BLOCK_TAGS.test(c.tagName));
+    if (hasBlockChild) { serializeChildren(el, parts); return; }
+    const text = inline(el);
+    if (text.trim()) parts.push(text);
+  };
+  const parts = [];
+  serializeChildren(root, parts);
+  return parts.join("\n\n").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Drag payload type for reordering image blocks inside the description editor.
+const IMG_BLOCK_DRAG_TYPE = "application/x-task-deck-image-block";
 
 // Pull image files out of a paste/drop DataTransfer (empty if none).
 function imageFilesFromTransfer(dt) {
@@ -1585,12 +1800,14 @@ class CardModal extends Modal {
     const actions = createElement("div", "ot-modal-actions");
     const deleteButton = createElement("button", "mod-warning", "Delete");
     const openNote = createElement("button", "", "Open note");
+    const exportPdf = createElement("button", "", "PDF");
     const close = createElement("button", "mod-cta", "Close");
     addButtonIcon(deleteButton, "trash");
     addButtonIcon(openNote, "file-text");
+    addButtonIcon(exportPdf, "download");
     addButtonIcon(close, "x");
 
-    [deleteButton, openNote, close].forEach((button) => {
+    [deleteButton, openNote, exportPdf, close].forEach((button) => {
       button.type = "button";
     });
 
@@ -1606,12 +1823,15 @@ class CardModal extends Modal {
       this.close();
     });
 
+    // Works in read-only too — exporting doesn't modify the card.
+    exportPdf.addEventListener("click", () => this.exportCardPdf().catch(console.error));
+
     close.addEventListener("click", async () => {
       await this.saveNow();
       this.close();
     });
 
-    actions.append(deleteButton, openNote, close);
+    actions.append(deleteButton, openNote, exportPdf, close);
 
     const editableFields = this.notesOnly ? [detailsField, checklistField] : [labelsField, assigneesField, detailsField, checklistField];
     const children = [title, ...editableFields, actions];
@@ -1721,7 +1941,10 @@ class CardModal extends Modal {
       if (!isWiki) target = target.split(/\s+/)[0]; // md link: drop optional "title"
       if (!IMG_EXT.test(target)) continue; // not an image link — leave it in the text
       if (match.index > last) segments.push({ type: "md", text: text.slice(last, match.index) });
-      segments.push({ type: "img", target });
+      // Keep the exact original markup so an editor rebuilding the markdown from
+      // segments round-trips wiki AND ![](url) embeds byte-identically. start/end
+      // let callers splice a resized embed back into the source string safely.
+      segments.push({ type: "img", target, markup: match[0], start: match.index, end: match.index + match[0].length });
       last = match.index + match[0].length;
     }
     if (last < text.length) segments.push({ type: "md", text: text.slice(last) });
@@ -1733,6 +1956,8 @@ class CardModal extends Modal {
    * Shows rendered Markdown by default, with a textarea editor on demand.
    */
   renderDetailsField() {
+    // Reset the block-editor caret hook; the edit branch below re-installs it.
+    this.insertDetailAtCaret = null;
     const field = createElement("section", "ot-field ot-details-field");
     const header = createElement("div", "ot-details-heading");
     const heading = createElement("div", "ot-details-heading-title");
@@ -1805,7 +2030,23 @@ class CardModal extends Modal {
       // keeps each image exactly where it was added, inline with the text.
       const body = createElement("div", "ot-details-body");
       preview.append(body);
-      this.splitDetailSegments(markdown).forEach((seg) => {
+      const segs = this.splitDetailSegments(markdown);
+      // Grid layout for the run of images around segIndex: writes an even column
+      // width into every embed of the run (descending offsets, so earlier
+      // splices can't shift later ones), saves, and re-renders.
+      const applyGridToSegRun = async (segIndex, columns) => {
+        const run = this.imageSegRun(segs, segIndex);
+        if (!run.length) return;
+        const width = columns ? this.gridColumnWidth(preview.clientWidth || 640, columns) : 0;
+        let source = this.localDetails;
+        [...run].sort((a, b) => b.start - a.start).forEach((s) => {
+          source = source.slice(0, s.start) + imageMarkupWithSize(s.markup, width) + source.slice(s.end);
+        });
+        this.localDetails = source;
+        await this.saveNow();
+        renderPreview();
+      };
+      segs.forEach((seg, segIndex) => {
         if (seg.type === "img") {
           const resolved = this.plugin.resolveCardImage(this.card, seg.target);
           const wrap = createElement("div", "ot-inline-image");
@@ -1814,12 +2055,63 @@ class CardModal extends Modal {
             img.src = resolved.src;
             img.alt = resolved.name || "";
             img.loading = "lazy";
-            img.addEventListener("click", (event) => {
-              event.stopPropagation();
-              if (resolved.file) this.app.workspace.getLeaf(false).openFile(resolved.file);
-              else if (resolved.src) window.open(resolved.src, "_blank");
-            });
+            // No click action on the image itself — opening the underlying note
+            // on every stray click was irritating. The preview's click-to-edit
+            // guard already ignores images, so a click here simply does nothing;
+            // copying is the hover chip's job.
             wrap.append(img);
+            // Hover chip: copy the image to the clipboard without entering edit
+            // mode (and without opening the file).
+            const copyButton = iconButton("copy", "Copy image", async (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              try {
+                await this.copyImageToClipboard(img);
+                new Notice("Image copied");
+              } catch (error) {
+                new Notice("Could not copy the image on this platform.");
+              }
+            });
+            copyButton.classList.add("ot-image-copy");
+            wrap.append(copyButton);
+            this.applyStoredImageWidth(img, seg.markup);
+            // Resize straight from the read view — the width is stored in the
+            // note's embed markup (Obsidian's |300 syntax), so it renders the
+            // same when the card note opens in Obsidian.
+            if (!this.readOnly) {
+              this.enableImageResize(wrap, img, {
+                getMarkup: () => seg.markup,
+                onCommit: async (width) => {
+                  const next = imageMarkupWithSize(seg.markup, width);
+                  if (next === seg.markup) return;
+                  // Splice at the segment's own offsets — replacing by string
+                  // would hit the wrong copy when the same image (and size)
+                  // appears twice in one note.
+                  const source = this.localDetails;
+                  this.localDetails = source.slice(0, seg.start) + next + source.slice(seg.end);
+                  seg.markup = next;
+                  await this.saveNow();
+                  renderPreview();
+                },
+              });
+              // Grid chip: lay the surrounding image run out as 2/3/4 columns.
+              const gridChip = iconButton("layout-grid", "Arrange images side by side", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const menu = new Menu();
+                [2, 3, 4].forEach((columns) => {
+                  menu.addItem((item) => item.setTitle(`${columns} side by side`).onClick(() => {
+                    applyGridToSegRun(segIndex, columns).catch(console.error);
+                  }));
+                });
+                menu.addItem((item) => item.setTitle("Full width").onClick(() => {
+                  applyGridToSegRun(segIndex, 0).catch(console.error);
+                }));
+                menu.showAtMouseEvent(event);
+              });
+              gridChip.classList.add("ot-image-grid-chip");
+              wrap.append(gridChip);
+            }
           } else {
             wrap.append(createElement("span", "ot-image-missing", seg.target.split("/").pop() || "image"));
           }
@@ -1885,6 +2177,13 @@ class CardModal extends Modal {
       renderPreview();
     };
 
+    // Toolbar buttons must not steal focus from the contenteditable on mousedown,
+    // or the user's selection collapses before the command can format it.
+    const keepEditorSelection = (button) => {
+      button.addEventListener("mousedown", (event) => event.preventDefault());
+      return button;
+    };
+
     const makeTool = (icon, label, onClick) => {
       const button = iconButton(icon, label, (event) => {
         event.preventDefault();
@@ -1892,7 +2191,7 @@ class CardModal extends Modal {
         onClick();
       });
       button.classList.add("ot-details-tool");
-      return button;
+      return keepEditorSelection(button);
     };
 
     const makeTextTool = (label, title, onClick) => {
@@ -1905,49 +2204,341 @@ class CardModal extends Modal {
         event.stopPropagation();
         onClick();
       });
-      return button;
+      return keepEditorSelection(button);
     };
 
-    const setEditorText = (value, start, end) => {
-      editor.value = value;
-      this.detailsDraft = value;
-      editor.selectionStart = start;
-      editor.selectionEnd = end;
-      renderGallery();
-      editor.focus();
+    // ---- Block editor (Notion/Trello-style WYSIWYG) ----
+    // Editing splits the markdown into TEXT blocks (contenteditable surfaces
+    // where bold/italic/lists render LIVE) and IMAGE blocks (real thumbnails
+    // with a remove chip) — the user never sees raw markdown markers. `blocks`
+    // is the source of truth while editing; each input serializes its block back
+    // to markdown (detailsHtmlToMd) and syncDraft() re-joins the whole note into
+    // the hidden master textarea (`editor`) that saveDetails/saveNow already read.
+    const blocksHost = createElement("div", "ot-block-editor");
+    let blocks = [];
+    let activeText = null; // { block, ce } of the focused text block
+
+    const buildBlocks = (markdown) => {
+      const built = [];
+      this.splitDetailSegments(String(markdown || "")).forEach((seg) => {
+        if (seg.type === "img") {
+          // Guarantee a text slot before an image so there's always somewhere
+          // to type between/around pictures.
+          if (!built.length || built[built.length - 1].type === "img") built.push({ type: "text", value: "" });
+          built.push({ type: "img", target: seg.target, markup: seg.markup || `![[${seg.target}]]` });
+          return;
+        }
+        const value = seg.text.replace(/^\n+/, "").replace(/\n+$/, "");
+        if (built.length && built[built.length - 1].type === "text") {
+          const prev = built[built.length - 1];
+          prev.value = prev.value && value ? `${prev.value}\n${value}` : (prev.value || value);
+        } else {
+          built.push({ type: "text", value });
+        }
+      });
+      if (!built.length || built[0].type === "img") built.unshift({ type: "text", value: "" });
+      if (built[built.length - 1].type === "img") built.push({ type: "text", value: "" });
+      return built;
     };
 
-    const wrapSelection = (before, after, placeholder) => {
-      const start = editor.selectionStart || 0;
-      const end = editor.selectionEnd || start;
-      const selected = editor.value.slice(start, end) || placeholder;
-      const next = editor.value.slice(0, start) + before + selected + after + editor.value.slice(end);
-      setEditorText(next, start + before.length, start + before.length + selected.length);
+    const joinBlocks = () => {
+      const parts = [];
+      blocks.forEach((block) => {
+        if (block.type === "img") parts.push(block.markup);
+        else if (block.value.trim()) parts.push(block.value.replace(/\n{3,}/g, "\n\n"));
+      });
+      return parts.join("\n\n");
     };
 
-    const prefixLines = (prefix) => {
-      const start = editor.selectionStart || 0;
-      const end = editor.selectionEnd || start;
-      const lineStart = editor.value.lastIndexOf("\n", start - 1) + 1;
-      const lineEndIndex = editor.value.indexOf("\n", end);
-      const lineEnd = lineEndIndex === -1 ? editor.value.length : lineEndIndex;
-      const block = editor.value.slice(lineStart, lineEnd) || "";
-      const nextBlock = block.split("\n").map((line) => (line.startsWith(prefix) ? line : `${prefix}${line || " "}`)).join("\n");
-      const next = editor.value.slice(0, lineStart) + nextBlock + editor.value.slice(lineEnd);
-      setEditorText(next, lineStart, lineStart + nextBlock.length);
+    const syncDraft = () => {
+      this.detailsDraft = joinBlocks();
+      editor.value = this.detailsDraft;
     };
 
-    const insertBlock = (text) => {
-      const start = editor.selectionStart || editor.value.length;
-      const end = editor.selectionEnd || start;
-      const before = editor.value.slice(0, start);
-      const after = editor.value.slice(end);
-      const prefix = before && !before.endsWith("\n") ? "\n" : "";
-      const suffix = after && !after.startsWith("\n") ? "\n" : "";
-      const inserted = `${prefix}${text}${suffix}`;
-      const next = before + inserted + after;
-      setEditorText(next, start + inserted.length, start + inserted.length);
+    const placeCaret = (ce, atStart) => {
+      ce.focus();
+      const range = document.createRange();
+      range.selectNodeContents(ce);
+      range.collapse(!!atStart);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
     };
+
+    const focusedText = () => {
+      if (activeText && blocks.includes(activeText.block) && activeText.ce && activeText.ce.isConnected) return activeText;
+      for (let i = blocks.length - 1; i >= 0; i -= 1) {
+        if (blocks[i].type === "text" && blocks[i]._ce) return { block: blocks[i], ce: blocks[i]._ce };
+      }
+      return null;
+    };
+
+    const syncBlockFromDom = (t) => {
+      t.block.value = detailsHtmlToMd(t.ce);
+      syncDraft();
+    };
+
+    // Toolbar commands run against the focused contenteditable via execCommand,
+    // so bold/italic/lists render LIVE in the editor (and Enter continues a
+    // list natively) instead of inserting raw markdown markers.
+    const runCommand = (mutate) => {
+      const t = focusedText();
+      if (!t) return;
+      t.ce.focus();
+      mutate(t);
+      syncBlockFromDom(t);
+    };
+    const execCmd = (command, value) => runCommand(() => document.execCommand(command, false, value || null));
+    const toggleBlockFormat = (tag) => runCommand(() => {
+      const current = String(document.queryCommandValue("formatBlock") || "").toLowerCase();
+      document.execCommand("formatBlock", false, current === tag ? "p" : tag);
+    });
+    const wrapCode = () => runCommand(() => {
+      const selection = window.getSelection();
+      if (!selection || !selection.rangeCount || selection.isCollapsed) {
+        document.execCommand("insertText", false, "`code`");
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      try {
+        range.surroundContents(document.createElement("code"));
+      } catch (error) {
+        document.execCommand("insertText", false, `\`${selection.toString()}\``);
+      }
+    });
+    const insertLink = () => {
+      const t = focusedText();
+      if (!t) return;
+      const selection = window.getSelection();
+      const hasSelection = !!(selection && selection.rangeCount && !selection.isCollapsed && t.ce.contains(selection.anchorNode));
+      const savedRange = hasSelection ? selection.getRangeAt(0).cloneRange() : null;
+      new TextPromptModal(this.app, "Link", "https://...", "https://", (url) => {
+        const target = textLine(url);
+        if (!target || target === "https://") return;
+        t.ce.focus();
+        if (savedRange) {
+          const restore = window.getSelection();
+          restore.removeAllRanges();
+          restore.addRange(savedRange);
+          document.execCommand("createLink", false, target);
+        } else {
+          document.execCommand("insertHTML", false, `<a href="${escapeDetailsHtml(target)}">${escapeDetailsHtml(target)}</a>`);
+        }
+        syncBlockFromDom(t);
+      }).open();
+    };
+
+    // The run of consecutive image blocks around `index` (empty text slots
+    // between images don't break the run) — the group a grid layout applies to.
+    const imageRunAround = (index) => {
+      if (!blocks[index] || blocks[index].type !== "img") return [];
+      const isGap = (b) => b && b.type === "text" && !b.value.trim();
+      let start = index;
+      while (start - 1 >= 0) {
+        if (blocks[start - 1].type === "img") { start -= 1; continue; }
+        if (isGap(blocks[start - 1]) && start - 2 >= 0 && blocks[start - 2].type === "img") { start -= 2; continue; }
+        break;
+      }
+      const run = [];
+      for (let i = start; i < blocks.length; i += 1) {
+        if (blocks[i].type === "img") { run.push(blocks[i]); continue; }
+        if (isGap(blocks[i]) && blocks[i + 1] && blocks[i + 1].type === "img") continue;
+        break;
+      }
+      return run;
+    };
+
+    const applyGridToBlockRun = (index, columns) => {
+      const run = imageRunAround(index);
+      if (!run.length) return;
+      const width = columns ? this.gridColumnWidth(blocksHost.clientWidth || 640, columns) : 0;
+      run.forEach((b) => { b.markup = imageMarkupWithSize(b.markup, width); });
+      syncDraft();
+      renderBlocks();
+    };
+
+    const renderBlocks = () => {
+      blocksHost.replaceChildren();
+      blocks.forEach((block, index) => {
+        if (block.type === "text") {
+          // A real WYSIWYG surface: markdown renders as formatted content and
+          // serializes back on every input — the user never sees the markers.
+          const ce = createElement("div", "ot-block-text");
+          ce.contentEditable = "true";
+          ce.spellcheck = true;
+          ce.innerHTML = detailsMdToHtml(block.value);
+          if (index === 0 && blocks.length === 1) ce.dataset.placeholder = "Write a description...";
+          const refreshEmpty = () => { ce.dataset.empty = ce.textContent.trim() ? "false" : "true"; };
+          refreshEmpty();
+          // An empty text slot wedged between two images collapses to a slim
+          // clickable strip so consecutive images sit side by side like a grid;
+          // typing in it expands it back to a full row — matching the read
+          // view, where text between two embeds breaks the image flow.
+          const betweenImages = !!(blocks[index - 1] && blocks[index - 1].type === "img" && blocks[index + 1] && blocks[index + 1].type === "img");
+          const refreshSlim = () => { ce.classList.toggle("ot-block-text--slim", betweenImages && !ce.textContent.trim()); };
+          refreshSlim();
+          ce.addEventListener("input", () => {
+            block.value = detailsHtmlToMd(ce);
+            syncDraft();
+            refreshEmpty();
+            refreshSlim();
+          });
+          ce.addEventListener("focus", () => { activeText = { block, ce }; });
+          // Escape hatch for quotes and lists (Notion behavior): pressing Enter
+          // on an EMPTY line inside a blockquote or list item exits it and drops
+          // the caret into a normal paragraph below — otherwise contenteditable
+          // keeps every new line trapped inside the quote forever.
+          ce.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" || event.shiftKey) return;
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount || !selection.isCollapsed) return;
+            const anchor = selection.anchorNode;
+            if (!anchor || !ce.contains(anchor)) return;
+            const el = anchor.nodeType === 1 ? anchor : anchor.parentElement;
+            if (!el) return;
+            const listItem = el.closest("li");
+            const quote = el.closest("blockquote");
+            if (!listItem && !quote) return;
+            // The "current line" must be a wrapper INSIDE the quote - closest()
+            // can walk past a structureless quote up to the editor root, whose
+            // textContent is the whole block (the escape would never fire there).
+            let line = listItem;
+            if (!line) {
+              const candidate = el.closest("p, div");
+              line = candidate && quote.contains(candidate) && candidate !== quote ? candidate : quote;
+            }
+            if ((line.textContent || "").replace(/\u00a0/g, " ").trim()) return; // line has content — normal Enter
+            event.preventDefault();
+            document.execCommand("outdent");
+            block.value = detailsHtmlToMd(ce);
+            syncDraft();
+            refreshEmpty();
+          });
+          ce.addEventListener("paste", (event) => {
+            const images = imageFilesFromTransfer(event.clipboardData);
+            if (images.length) {
+              event.preventDefault();
+              insertImagesSequentially(images).catch(console.error);
+              return;
+            }
+            // Paste as plain text so foreign HTML styling can't leak into the note.
+            const text = event.clipboardData ? event.clipboardData.getData("text/plain") : "";
+            event.preventDefault();
+            if (text) document.execCommand("insertText", false, text);
+          });
+          block._ce = ce;
+          blocksHost.append(ce);
+          return;
+        }
+        const wrap = createElement("div", "ot-block-image");
+        const resolved = this.plugin.resolveCardImage(this.card, block.target);
+        if (resolved && resolved.src) {
+          const img = createElement("img", "");
+          img.src = resolved.src;
+          img.alt = resolved.name || "";
+          img.loading = "lazy";
+          wrap.append(img);
+          this.applyStoredImageWidth(img, block.markup);
+          // Drag-resize rewrites the block's markup in place; joinBlocks picks
+          // it up on the next keystroke, and Save persists it like any edit.
+          this.enableImageResize(wrap, img, {
+            getMarkup: () => block.markup,
+            onCommit: (width) => {
+              block.markup = imageMarkupWithSize(block.markup, width);
+              syncDraft();
+            },
+          });
+        } else {
+          wrap.append(createElement("span", "ot-image-missing", block.target.split("/").pop() || "image"));
+        }
+        const remove = iconButton("trash", "Remove image", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const at = blocks.indexOf(block);
+          if (at === -1) return;
+          blocks.splice(at, 1);
+          // Merge the text blocks the image used to separate.
+          if (at > 0 && at < blocks.length && blocks[at - 1].type === "text" && blocks[at].type === "text") {
+            const merged = [blocks[at - 1].value, blocks[at].value].filter((part) => part.trim());
+            blocks[at - 1].value = merged.join("\n\n");
+            blocks.splice(at, 1);
+          }
+          syncDraft();
+          renderBlocks();
+        });
+        remove.classList.add("ot-block-image-remove");
+        wrap.append(remove);
+
+        // Grid chip: lay the surrounding image run out as 2/3/4 columns.
+        const gridChip = iconButton("layout-grid", "Arrange images side by side", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const menu = new Menu();
+          [2, 3, 4].forEach((columns) => {
+            menu.addItem((item) => item.setTitle(`${columns} side by side`).onClick(() => {
+              applyGridToBlockRun(blocks.indexOf(block), columns);
+            }));
+          });
+          menu.addItem((item) => item.setTitle("Full width").onClick(() => {
+            applyGridToBlockRun(blocks.indexOf(block), 0);
+          }));
+          menu.showAtMouseEvent(event);
+        });
+        gridChip.classList.add("ot-image-grid-chip");
+        wrap.append(gridChip);
+
+        // Move an image by dragging it: drop on another image's left/right half
+        // to land before/after it. Structure re-normalizes from the markdown so
+        // the text slots around images stay consistent after any move.
+        wrap.draggable = true;
+        wrap.addEventListener("dragstart", (event) => {
+          if (event.target.closest(".ot-img-resize, .ot-block-image-remove, .ot-image-grid-chip")) {
+            event.preventDefault();
+            return;
+          }
+          event.dataTransfer.setData(IMG_BLOCK_DRAG_TYPE, String(blocks.indexOf(block)));
+          event.dataTransfer.effectAllowed = "move";
+          wrap.classList.add("is-dragging");
+        });
+        wrap.addEventListener("dragend", () => wrap.classList.remove("is-dragging"));
+        wrap.addEventListener("dragover", (event) => {
+          if (!hasDragType(event, IMG_BLOCK_DRAG_TYPE)) return;
+          event.preventDefault();
+          const rect = wrap.getBoundingClientRect();
+          const before = event.clientX < rect.left + rect.width / 2;
+          wrap.classList.toggle("is-img-drop-before", before);
+          wrap.classList.toggle("is-img-drop-after", !before);
+        });
+        wrap.addEventListener("dragleave", () => wrap.classList.remove("is-img-drop-before", "is-img-drop-after"));
+        wrap.addEventListener("drop", (event) => {
+          if (!hasDragType(event, IMG_BLOCK_DRAG_TYPE)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const before = wrap.classList.contains("is-img-drop-before");
+          wrap.classList.remove("is-img-drop-before", "is-img-drop-after");
+          const fromIndex = parseInt(event.dataTransfer.getData(IMG_BLOCK_DRAG_TYPE), 10);
+          const dragged = blocks[fromIndex];
+          if (!dragged || dragged === block || dragged.type !== "img") return;
+          blocks.splice(fromIndex, 1);
+          let to = blocks.indexOf(block);
+          if (to === -1) return;
+          if (!before) to += 1;
+          blocks.splice(to, 0, dragged);
+          blocks = buildBlocks(joinBlocks());
+          syncDraft();
+          renderBlocks();
+        });
+
+        blocksHost.append(wrap);
+      });
+    };
+
+    // Clicking the frame's empty space puts the caret in the nearest text block.
+    blocksHost.addEventListener("click", (event) => {
+      if (event.target !== blocksHost) return;
+      const t = focusedText();
+      if (t && t.ce) placeCaret(t.ce, false);
+    });
 
     // Paste or drop an image straight into the notes: it's saved into the vault
     // (respecting the attachment-folder setting) and embedded compactly.
@@ -1991,30 +2582,75 @@ class CardModal extends Modal {
       const toolbar = createElement("div", "ot-details-toolbar");
       const leftTools = createElement("div", "ot-details-toolbar-group");
       leftTools.append(
-        makeTextTool("Tt", "Heading", () => prefixLines("### ")),
-        makeTextTool("B", "Bold", () => wrapSelection("**", "**", "bold text")),
-        makeTextTool("I", "Italic", () => wrapSelection("*", "*", "italic text")),
-        makeTool("ellipsis", "More", () => insertBlock("> ")),
-        makeTool("list", "List", () => prefixLines("- ")),
-        makeTool("link", "Link", () => wrapSelection("[", "](https://)", "link")),
+        makeTextTool("Tt", "Heading", () => toggleBlockFormat("h3")),
+        makeTextTool("B", "Bold", () => execCmd("bold")),
+        makeTextTool("I", "Italic", () => execCmd("italic")),
+        makeTool("ellipsis", "Quote", () => toggleBlockFormat("blockquote")),
+        makeTool("list", "Bulleted list", () => execCmd("insertUnorderedList")),
+        makeTool("link", "Link", insertLink),
         makeTool("image", "Add image", () => imageInput.click()),
-        makeTool("plus", "Divider", () => insertBlock("---"))
+        makeTool("plus", "Divider", () => execCmd("insertHorizontalRule"))
       );
 
       const rightTools = createElement("div", "ot-details-toolbar-group");
       rightTools.append(
         makeTool("paperclip", "Attach image", () => imageInput.click()),
-        makeTextTool("M", "Markdown", () => wrapSelection("`", "`", "code")),
-        makeTool("help-circle", "Formatting help", () => new Notice("Markdown: **bold**, *italic*, - list, [link](url)."))
+        makeTextTool("M", "Code", wrapCode),
+        makeTool("help-circle", "Formatting help", () => new Notice("Select text, then use the toolbar — formatting shows live in the editor."))
       );
       toolbar.append(leftTools, rightTools);
 
-      const editorFrame = createElement("div", "ot-trello-editor");
-      editor.classList.remove("is-hidden");
-      editor.addEventListener("input", () => {
-        this.detailsDraft = editor.value;
-      });
-      editor.addEventListener("paste", handlePaste);
+      const editorFrame = createElement("div", "ot-trello-editor ot-block-frame");
+      // The master textarea stays hidden: it only mirrors the joined markdown so
+      // saveDetails / insertImageFromFile keep reading the same place as before.
+      blocks = buildBlocks(this.detailsDraft);
+      syncDraft();
+      renderBlocks();
+
+      // An image pasted/attached while editing lands at the active block's caret,
+      // splitting the text so the picture renders inline immediately — the user
+      // never sees ![[...]] markup.
+      this.insertDetailAtCaret = (markup) => {
+        const t = focusedText();
+        if (!t) return false;
+        const at = blocks.indexOf(t.block);
+        if (at === -1) return false;
+        // Split the focused contenteditable at the caret: serialize what's
+        // before and after it, so the image lands exactly where you're typing.
+        let beforeText = t.block.value;
+        let afterText = "";
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount && t.ce.contains(selection.anchorNode)) {
+          const range = selection.getRangeAt(0);
+          const beforeRange = document.createRange();
+          beforeRange.selectNodeContents(t.ce);
+          beforeRange.setEnd(range.startContainer, range.startOffset);
+          const afterRange = document.createRange();
+          afterRange.selectNodeContents(t.ce);
+          afterRange.setStart(range.endContainer, range.endOffset);
+          const beforeHost = document.createElement("div");
+          beforeHost.append(beforeRange.cloneContents());
+          const afterHost = document.createElement("div");
+          afterHost.append(afterRange.cloneContents());
+          beforeText = detailsHtmlToMd(beforeHost);
+          afterText = detailsHtmlToMd(afterHost);
+        }
+        const seg = this.splitDetailSegments(markup).find((s) => s.type === "img");
+        blocks.splice(
+          at,
+          1,
+          { type: "text", value: beforeText },
+          { type: "img", target: (seg && seg.target) || markup, markup },
+          { type: "text", value: afterText }
+        );
+        syncDraft();
+        renderBlocks();
+        const nextBlock = blocks[at + 2];
+        requestAnimationFrame(() => {
+          if (nextBlock && nextBlock._ce) placeCaret(nextBlock._ce, true);
+        });
+        return true;
+      };
 
       const actions = createElement("div", "ot-details-actions");
       const save = createElement("button", "mod-cta", "Save");
@@ -2028,14 +2664,32 @@ class CardModal extends Modal {
       actions.append(save, cancel);
 
       header.append(heading);
-      editorFrame.append(toolbar, editor);
-      field.append(header, editorFrame, actions, imageInput);
-      requestAnimationFrame(() => editor.focus());
+      editorFrame.append(toolbar, blocksHost);
+      field.append(header, editorFrame, actions, imageInput, editor);
+      requestAnimationFrame(() => {
+        // Enter should produce clean <p> paragraphs (matches the serializer).
+        try { document.execCommand("defaultParagraphSeparator", false, "p"); } catch (error) { /* older engines */ }
+        const t = focusedText();
+        if (t && t.ce) placeCaret(t.ce, false);
+      });
       return field;
     }
 
     header.append(heading);
     if (!this.readOnly) header.append(textButton("pencil", "Edit", showEditor, "ot-details-edit-button"));
+    // Click-to-edit: clicking the description opens the editor directly — no
+    // trip to the Edit button. Guards keep the read view copy-friendly:
+    // - a click that ends a TEXT SELECTION (drag-select, double-click a word)
+    //   must select/copy, not switch to the editor;
+    // - images, links, and buttons (Copy image, Show more) keep their own click
+    //   behavior and never flip to edit.
+    preview.addEventListener("click", (event) => {
+      if (this.readOnly) return;
+      if (event.target.closest("img, a, button, .ot-inline-image")) return;
+      const selection = window.getSelection();
+      if (selection && selection.toString()) return;
+      showEditor();
+    });
     renderPreview();
     field.append(preview, editor, imageInput);
     field.prepend(header);
@@ -2109,6 +2763,271 @@ class CardModal extends Modal {
     }
   }
 
+  // Copy a rendered <img> to the system clipboard as PNG. Draws through a canvas
+  // because the source is a vault resource URL (same-origin in Obsidian, so the
+  // canvas is not tainted). ClipboardItem exists on desktop (Electron); on a
+  // platform without it this throws and the caller shows a notice.
+  async copyImageToClipboard(img) {
+    if (!img.complete || !(img.naturalWidth > 0)) throw new Error("image not loaded");
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob || typeof ClipboardItem === "undefined" || !navigator.clipboard || !navigator.clipboard.write) {
+      throw new Error("clipboard image write unsupported");
+    }
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+  }
+
+  // Applies the width stored in an embed's markup (Obsidian's |300 syntax) to a
+  // rendered <img>. An explicit width lifts the height cap: the size is the
+  // user's choice, so tall images must not be letterboxed by max-height.
+  applyStoredImageWidth(img, markup) {
+    const width = imageSizeFromMarkup(markup);
+    if (width) {
+      img.style.width = `${width}px`;
+      img.style.maxHeight = "none";
+    }
+  }
+
+  // The run of consecutive image segments around `index` (whitespace-only text
+  // between images doesn't break the run) — the group a grid layout applies to.
+  imageSegRun(segs, index) {
+    if (!segs[index] || segs[index].type !== "img") return [];
+    const isGap = (s) => s && s.type === "md" && !s.text.trim();
+    let start = index;
+    while (start - 1 >= 0) {
+      if (segs[start - 1].type === "img") { start -= 1; continue; }
+      if (isGap(segs[start - 1]) && start - 2 >= 0 && segs[start - 2].type === "img") { start -= 2; continue; }
+      break;
+    }
+    const run = [];
+    for (let i = start; i < segs.length; i += 1) {
+      if (segs[i].type === "img") { run.push(segs[i]); continue; }
+      if (isGap(segs[i]) && segs[i + 1] && segs[i + 1].type === "img") continue;
+      break;
+    }
+    return run;
+  }
+
+  // Even column width for a K-across image grid inside a container.
+  gridColumnWidth(containerWidth, columns) {
+    const width = Math.floor((Math.max(320, containerWidth) - 28 - columns * 10) / columns);
+    return Math.max(100, width);
+  }
+
+  /**
+   * Notion-style image resize: a grip on the image's right edge. Dragging
+   * resizes the live <img> (with a px chip); on release the width is committed
+   * through onCommit(width) — 0 meaning "clear the size" when dragged to full
+   * width — which rewrites the embed markup via imageMarkupWithSize, so the
+   * size persists in the note and renders identically in Obsidian. Consecutive
+   * images flow side by side, so sizing two down makes an instant grid.
+   */
+  enableImageResize(wrap, img, options) {
+    const { getMarkup, onCommit } = options;
+    const handle = createElement("div", "ot-img-resize");
+    handle.title = "Drag to resize";
+    handle.setAttribute("aria-label", "Resize image");
+    const chip = createElement("div", "ot-img-size-chip is-hidden");
+    wrap.append(handle, chip);
+
+    let drag = null;
+    const finishDrag = (commit) => {
+      if (!drag) return;
+      const { width, maxWidth } = drag;
+      drag = null;
+      handle.classList.remove("is-dragging");
+      chip.classList.add("is-hidden");
+      if (!commit) {
+        // Interrupted drag — fall back to whatever the markup still says.
+        img.style.width = "";
+        img.style.maxHeight = "";
+        this.applyStoredImageWidth(img, getMarkup());
+        return;
+      }
+      // At (practically) the container's width, storing no size renders the
+      // same — and keeps big future layouts full-width.
+      const finalWidth = width >= maxWidth - 2 ? 0 : width;
+      if (!finalWidth) {
+        img.style.width = "";
+        img.style.maxHeight = "";
+      }
+      Promise.resolve(onCommit(finalWidth)).catch(console.error);
+    };
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const container = wrap.parentElement;
+      const maxWidth = Math.max(160, (container ? container.clientWidth : 1200) - 4);
+      const startWidth = img.getBoundingClientRect().width;
+      drag = { startX: event.clientX, startWidth, maxWidth, width: Math.round(startWidth) };
+      handle.classList.add("is-dragging");
+      chip.classList.remove("is-hidden");
+      chip.textContent = `${drag.width}px`;
+      try { handle.setPointerCapture(event.pointerId); } catch (error) { /* older engines */ }
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      event.preventDefault();
+      const width = Math.min(drag.maxWidth, Math.max(100, Math.round(drag.startWidth + event.clientX - drag.startX)));
+      if (width === drag.width) return;
+      drag.width = width;
+      img.style.width = `${width}px`;
+      img.style.maxHeight = "none";
+      chip.textContent = `${width}px`;
+    });
+    handle.addEventListener("pointerup", (event) => {
+      try { handle.releasePointerCapture(event.pointerId); } catch (error) { /* not captured */ }
+      finishDrag(true);
+    });
+    handle.addEventListener("pointercancel", () => finishDrag(false));
+  }
+
+  // Export this card as a clean, print-styled PDF (title, board/list, labels,
+  // members, dates, description with embedded images, checklist). Desktop only:
+  // renders self-contained HTML in a hidden BrowserWindow and uses Electron's
+  // printToPDF — no dependence on the current window or Obsidian's note export.
+  async exportCardPdf() {
+    let remote = null;
+    try { remote = window.require && window.require("@electron/remote"); } catch (error) { remote = null; }
+    if (!remote) {
+      try { remote = window.require && window.require("electron").remote; } catch (error) { remote = null; }
+    }
+    if (!remote || !remote.BrowserWindow || !remote.dialog) {
+      new Notice("PDF export needs the Obsidian desktop app.");
+      return;
+    }
+    try {
+      if (!this.readOnly) await this.saveNow();
+      const card = this.card;
+      const board = this.plugin.findBoardForCard(card);
+      const list = board && board.lists.find((item) => item.id === card.listId);
+      const esc = escapeDetailsHtml;
+
+      // Description: markdown via the shared converter; images inlined as data
+      // URLs so the hidden window needs no access to the vault's app:// protocol.
+      // Consecutive images form a RUN (whitespace between embeds doesn't break
+      // it) and print as a flex row with PERCENTAGE widths derived from the
+      // stored px sizes (relative to the ~800px modal they were sized in). Raw
+      // px would overflow the narrower A4 content box and wrap the grid into a
+      // single column — percentages keep 2-across as 2-across on any page.
+      const descriptionParts = [];
+      let imageRun = [];
+      const flushImageRun = () => {
+        if (!imageRun.length) return;
+        if (imageRun.length === 1) {
+          const only = imageRun[0];
+          const sizing = only.width ? ` style="width:${Math.min(only.width, 660)}px"` : "";
+          descriptionParts.push(`<img src="${only.src}"${sizing}>`);
+        } else {
+          const cells = imageRun.map((item) => {
+            const percent = Math.min(100, Math.max(12, Math.round(((item.width || 380) / 8) * 10) / 10));
+            return `<img src="${item.src}" style="width: calc(${percent}% - 8px)">`;
+          }).join("");
+          descriptionParts.push(`<div class="imgrow">${cells}</div>`);
+        }
+        imageRun = [];
+      };
+      for (const seg of this.splitDetailSegments(this.currentDetailsText())) {
+        if (seg.type === "img") {
+          const resolved = this.plugin.resolveCardImage(card, seg.target);
+          if (resolved && resolved.file) {
+            try {
+              const bin = await this.app.vault.readBinary(resolved.file);
+              const ext = (resolved.file.extension || "png").toLowerCase();
+              const mime = ext === "svg" ? "image/svg+xml" : (ext === "jpg" ? "image/jpeg" : `image/${ext}`);
+              imageRun.push({
+                src: `data:${mime};base64,${arrayBufferToBase64(bin)}`,
+                width: imageSizeFromMarkup(seg.markup),
+              });
+            } catch (error) {
+              // unreadable image — skip it rather than fail the export
+            }
+          }
+          continue;
+        }
+        if (!seg.text.trim()) continue; // whitespace gap — keep the image run going
+        flushImageRun();
+        descriptionParts.push(detailsMdToHtml(seg.text));
+      }
+      flushImageRun();
+
+      const labelsHtml = (this.localLabels || [])
+        .map((label) => `<span class="pill" style="background:${esc(label.color || "#2f6fd6")}">${esc(label.name)}</span>`)
+        .join("");
+      const membersText = (this.localAssignees || []).map((a) => a.name || a.email).filter(Boolean).join(", ");
+      const datesText = dateRangeLabel(card.startDate, card.dueDate) || "";
+      const checklistHtml = (this.localChecklist || [])
+        .map((item) => `<div class="chk"><span class="box">${item.done ? "☑" : "☐"}</span><span class="${item.done ? "done" : ""}">${esc(item.text || "")}</span>${item.assignee && (item.assignee.name || item.assignee.email) ? `<span class="who"> — ${esc(item.assignee.name || item.assignee.email)}</span>` : ""}</div>`)
+        .join("");
+      const metaBits = [
+        board ? esc(board.name) : "",
+        list ? esc(list.title) : "",
+        card.completed ? "Completed" : "",
+        datesText ? esc(datesText) : "",
+      ].filter(Boolean).join(" • ");
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(this.localTitle || "Card")}</title><style>
+        body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1f2328; margin: 42px; line-height: 1.5; }
+        h1 { font-size: 24px; margin: 0 0 6px; }
+        .meta { color: #667085; font-size: 13px; margin-bottom: 12px; }
+        .pill { display: inline-block; color: #fff; border-radius: 4px; padding: 2px 10px; font-size: 12px; font-weight: 700; margin: 0 6px 6px 0; }
+        .section { margin-top: 22px; }
+        .section h2 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+        img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
+        .imgrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 10px 0; }
+        .imgrow img { margin: 0; }
+        .chk { margin: 4px 0; }
+        .box { margin-right: 7px; }
+        .done { text-decoration: line-through; color: #98a2b3; }
+        .who { color: #667085; font-size: 12px; }
+        blockquote { border-left: 3px solid #e5e7eb; margin: 8px 0; padding: 2px 12px; color: #667085; }
+        code { background: #f2f4f7; padding: 1px 5px; border-radius: 4px; }
+        ul, ol { padding-left: 22px; }
+        p { margin: 0 0 0.6em; }
+      </style></head><body>
+        <h1>${esc(this.localTitle || "Card")}</h1>
+        ${metaBits ? `<div class="meta">${metaBits}</div>` : ""}
+        ${labelsHtml ? `<div>${labelsHtml}</div>` : ""}
+        ${membersText ? `<div class="meta" style="margin-top:8px">Members: ${esc(membersText)}</div>` : ""}
+        ${descriptionParts.length ? `<div class="section"><h2>Description</h2>${descriptionParts.join("")}</div>` : ""}
+        ${checklistHtml ? `<div class="section"><h2>Checklist</h2>${checklistHtml}</div>` : ""}
+      </body></html>`;
+
+      const chosen = await remote.dialog.showSaveDialog({
+        defaultPath: `${String(this.localTitle || "card").replace(/[\\/:*?"<>|]/g, "-").trim() || "card"}.pdf`,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (!chosen || chosen.canceled || !chosen.filePath) return;
+
+      const fs = window.require("fs");
+      const os = window.require("os");
+      const pathMod = window.require("path");
+      const tmpPath = pathMod.join(os.tmpdir(), `task-deck-card-${Date.now()}.html`);
+      fs.writeFileSync(tmpPath, html, "utf8");
+      const win = new remote.BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      try {
+        await win.loadFile(tmpPath);
+        // Give layout a beat to settle (data-URI images decode synchronously,
+        // but pagination measures after first paint).
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: "A4" });
+        fs.writeFileSync(chosen.filePath, pdf);
+        new Notice("PDF saved.");
+      } finally {
+        win.destroy();
+        try { fs.unlinkSync(tmpPath); } catch (error) { /* temp cleanup is best-effort */ }
+      }
+    } catch (error) {
+      console.error(error);
+      new Notice("Could not export the PDF.");
+    }
+  }
+
   removeImageRef(ref) {
     if (this.readOnly || !ref || !ref.markup) return;
     const next = String(this.currentDetailsText() || "")
@@ -2130,6 +3049,9 @@ class CardModal extends Modal {
    */
   insertDetailText(text) {
     if (this.readOnly) return false;
+    // Block editor open: let it place the embed at the active block's caret and
+    // render it as a real image immediately.
+    if (this.editingDetails && this.insertDetailAtCaret) return this.insertDetailAtCaret(text);
     const ta = this.detailsTextarea;
     // In the editor, drop the embed at the caret so it lands where you're typing.
     if (this.editingDetails && ta && !ta.classList.contains("is-hidden")) {
