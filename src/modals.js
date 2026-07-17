@@ -1158,6 +1158,20 @@ class CardModal extends Modal {
               else if (resolved.src) window.open(resolved.src, "_blank");
             });
             wrap.append(img);
+            // Hover chip: copy the image to the clipboard without entering edit
+            // mode (and without opening the file).
+            const copyButton = iconButton("copy", "Copy image", async (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              try {
+                await this.copyImageToClipboard(img);
+                new Notice("Image copied");
+              } catch (error) {
+                new Notice("Could not copy the image on this platform.");
+              }
+            });
+            copyButton.classList.add("ot-image-copy");
+            wrap.append(copyButton);
           } else {
             wrap.append(createElement("span", "ot-image-missing", seg.target.split("/").pop() || "image"));
           }
@@ -1374,6 +1388,19 @@ class CardModal extends Modal {
 
     header.append(heading);
     if (!this.readOnly) header.append(textButton("pencil", "Edit", showEditor, "ot-details-edit-button"));
+    // Click-to-edit: clicking the description opens the editor directly — no
+    // trip to the Edit button. Guards keep the read view copy-friendly:
+    // - a click that ends a TEXT SELECTION (drag-select, double-click a word)
+    //   must select/copy, not switch to the editor;
+    // - images, links, and buttons (Copy image, Show more) keep their own click
+    //   behavior and never flip to edit.
+    preview.addEventListener("click", (event) => {
+      if (this.readOnly) return;
+      if (event.target.closest("img, a, button, .ot-inline-image")) return;
+      const selection = window.getSelection();
+      if (selection && selection.toString()) return;
+      showEditor();
+    });
     renderPreview();
     field.append(preview, editor, imageInput);
     field.prepend(header);
@@ -1445,6 +1472,23 @@ class CardModal extends Modal {
     } else if (resolved && resolved.src) {
       window.open(resolved.src, "_blank");
     }
+  }
+
+  // Copy a rendered <img> to the system clipboard as PNG. Draws through a canvas
+  // because the source is a vault resource URL (same-origin in Obsidian, so the
+  // canvas is not tainted). ClipboardItem exists on desktop (Electron); on a
+  // platform without it this throws and the caller shows a notice.
+  async copyImageToClipboard(img) {
+    if (!img.complete || !(img.naturalWidth > 0)) throw new Error("image not loaded");
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob || typeof ClipboardItem === "undefined" || !navigator.clipboard || !navigator.clipboard.write) {
+      throw new Error("clipboard image write unsupported");
+    }
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
   }
 
   removeImageRef(ref) {
