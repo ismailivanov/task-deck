@@ -1,4 +1,4 @@
-const { MarkdownRenderer, Menu, Modal, Notice, setIcon } = require("obsidian");
+const { MarkdownRenderer, Menu, Modal, Notice, arrayBufferToBase64, setIcon } = require("obsidian");
 
 // Modal UIs for cards, labels, dates, prompts, and the short about panel.
 const {
@@ -15,6 +15,7 @@ const {
   clone,
   createElement,
   dateFromISO,
+  dateRangeLabel,
   fieldDateLabel,
   iconButton,
   imageRefsFromMarkdown,
@@ -1053,12 +1054,14 @@ class CardModal extends Modal {
     const actions = createElement("div", "ot-modal-actions");
     const deleteButton = createElement("button", "mod-warning", "Delete");
     const openNote = createElement("button", "", "Open note");
+    const exportPdf = createElement("button", "", "PDF");
     const close = createElement("button", "mod-cta", "Close");
     addButtonIcon(deleteButton, "trash");
     addButtonIcon(openNote, "file-text");
+    addButtonIcon(exportPdf, "download");
     addButtonIcon(close, "x");
 
-    [deleteButton, openNote, close].forEach((button) => {
+    [deleteButton, openNote, exportPdf, close].forEach((button) => {
       button.type = "button";
     });
 
@@ -1074,12 +1077,15 @@ class CardModal extends Modal {
       this.close();
     });
 
+    // Works in read-only too — exporting doesn't modify the card.
+    exportPdf.addEventListener("click", () => this.exportCardPdf().catch(console.error));
+
     close.addEventListener("click", async () => {
       await this.saveNow();
       this.close();
     });
 
-    actions.append(deleteButton, openNote, close);
+    actions.append(deleteButton, openNote, exportPdf, close);
 
     const editableFields = this.notesOnly ? [detailsField, checklistField] : [labelsField, assigneesField, detailsField, checklistField];
     const children = [title, ...editableFields, actions];
@@ -1833,6 +1839,118 @@ class CardModal extends Modal {
       throw new Error("clipboard image write unsupported");
     }
     await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+  }
+
+  // Export this card as a clean, print-styled PDF (title, board/list, labels,
+  // members, dates, description with embedded images, checklist). Desktop only:
+  // renders self-contained HTML in a hidden BrowserWindow and uses Electron's
+  // printToPDF — no dependence on the current window or Obsidian's note export.
+  async exportCardPdf() {
+    let remote = null;
+    try { remote = window.require && window.require("@electron/remote"); } catch (error) { remote = null; }
+    if (!remote) {
+      try { remote = window.require && window.require("electron").remote; } catch (error) { remote = null; }
+    }
+    if (!remote || !remote.BrowserWindow || !remote.dialog) {
+      new Notice("PDF export needs the Obsidian desktop app.");
+      return;
+    }
+    try {
+      if (!this.readOnly) await this.saveNow();
+      const card = this.card;
+      const board = this.plugin.findBoardForCard(card);
+      const list = board && board.lists.find((item) => item.id === card.listId);
+      const esc = escapeDetailsHtml;
+
+      // Description: markdown via the shared converter; images inlined as data
+      // URLs so the hidden window needs no access to the vault's app:// protocol.
+      const descriptionParts = [];
+      for (const seg of this.splitDetailSegments(this.currentDetailsText())) {
+        if (seg.type === "img") {
+          const resolved = this.plugin.resolveCardImage(card, seg.target);
+          if (resolved && resolved.file) {
+            try {
+              const bin = await this.app.vault.readBinary(resolved.file);
+              const ext = (resolved.file.extension || "png").toLowerCase();
+              const mime = ext === "svg" ? "image/svg+xml" : (ext === "jpg" ? "image/jpeg" : `image/${ext}`);
+              descriptionParts.push(`<img src="data:${mime};base64,${arrayBufferToBase64(bin)}">`);
+            } catch (error) {
+              // unreadable image — skip it rather than fail the export
+            }
+          }
+        } else if (seg.text.trim()) {
+          descriptionParts.push(detailsMdToHtml(seg.text));
+        }
+      }
+
+      const labelsHtml = (this.localLabels || [])
+        .map((label) => `<span class="pill" style="background:${esc(label.color || "#2f6fd6")}">${esc(label.name)}</span>`)
+        .join("");
+      const membersText = (this.localAssignees || []).map((a) => a.name || a.email).filter(Boolean).join(", ");
+      const datesText = dateRangeLabel(card.startDate, card.dueDate) || "";
+      const checklistHtml = (this.localChecklist || [])
+        .map((item) => `<div class="chk"><span class="box">${item.done ? "☑" : "☐"}</span><span class="${item.done ? "done" : ""}">${esc(item.text || "")}</span>${item.assignee && (item.assignee.name || item.assignee.email) ? `<span class="who"> — ${esc(item.assignee.name || item.assignee.email)}</span>` : ""}</div>`)
+        .join("");
+      const metaBits = [
+        board ? esc(board.name) : "",
+        list ? esc(list.title) : "",
+        card.completed ? "Completed" : "",
+        datesText ? esc(datesText) : "",
+      ].filter(Boolean).join(" • ");
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(this.localTitle || "Card")}</title><style>
+        body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1f2328; margin: 42px; line-height: 1.5; }
+        h1 { font-size: 24px; margin: 0 0 6px; }
+        .meta { color: #667085; font-size: 13px; margin-bottom: 12px; }
+        .pill { display: inline-block; color: #fff; border-radius: 4px; padding: 2px 10px; font-size: 12px; font-weight: 700; margin: 0 6px 6px 0; }
+        .section { margin-top: 22px; }
+        .section h2 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+        img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
+        .chk { margin: 4px 0; }
+        .box { margin-right: 7px; }
+        .done { text-decoration: line-through; color: #98a2b3; }
+        .who { color: #667085; font-size: 12px; }
+        blockquote { border-left: 3px solid #e5e7eb; margin: 8px 0; padding: 2px 12px; color: #667085; }
+        code { background: #f2f4f7; padding: 1px 5px; border-radius: 4px; }
+        ul, ol { padding-left: 22px; }
+        p { margin: 0 0 0.6em; }
+      </style></head><body>
+        <h1>${esc(this.localTitle || "Card")}</h1>
+        ${metaBits ? `<div class="meta">${metaBits}</div>` : ""}
+        ${labelsHtml ? `<div>${labelsHtml}</div>` : ""}
+        ${membersText ? `<div class="meta" style="margin-top:8px">Members: ${esc(membersText)}</div>` : ""}
+        ${descriptionParts.length ? `<div class="section"><h2>Description</h2>${descriptionParts.join("")}</div>` : ""}
+        ${checklistHtml ? `<div class="section"><h2>Checklist</h2>${checklistHtml}</div>` : ""}
+      </body></html>`;
+
+      const chosen = await remote.dialog.showSaveDialog({
+        defaultPath: `${String(this.localTitle || "card").replace(/[\\/:*?"<>|]/g, "-").trim() || "card"}.pdf`,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (!chosen || chosen.canceled || !chosen.filePath) return;
+
+      const fs = window.require("fs");
+      const os = window.require("os");
+      const pathMod = window.require("path");
+      const tmpPath = pathMod.join(os.tmpdir(), `task-deck-card-${Date.now()}.html`);
+      fs.writeFileSync(tmpPath, html, "utf8");
+      const win = new remote.BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      try {
+        await win.loadFile(tmpPath);
+        // Give layout a beat to settle (data-URI images decode synchronously,
+        // but pagination measures after first paint).
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: "A4" });
+        fs.writeFileSync(chosen.filePath, pdf);
+        new Notice("PDF saved.");
+      } finally {
+        win.destroy();
+        try { fs.unlinkSync(tmpPath); } catch (error) { /* temp cleanup is best-effort */ }
+      }
+    } catch (error) {
+      console.error(error);
+      new Notice("Could not export the PDF.");
+    }
   }
 
   removeImageRef(ref) {
