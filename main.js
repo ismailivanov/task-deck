@@ -771,6 +771,7 @@ function detailsMdToHtml(markdown) {
 // wrappers (span/font/...) are flattened to their text, so pasted styling can't
 // leak HTML into the note.
 function detailsHtmlToMd(root) {
+  const BLOCK_TAGS = /^(P|DIV|UL|OL|BLOCKQUOTE|HR|H[1-6])$/;
   const inline = (node) => {
     let out = "";
     node.childNodes.forEach((child) => {
@@ -787,44 +788,63 @@ function detailsHtmlToMd(root) {
     });
     return out;
   };
-  const parts = [];
-  root.childNodes.forEach((child) => {
-    if (child.nodeType === 3) {
-      if (child.textContent.trim()) parts.push(child.textContent);
+  // Chromium freely nests blocks (a <ul> inside the caret's <p>, a quote inside
+  // a <div>...), so serialization must RECURSE into containers — flattening a
+  // wrapped list through inline() used to glue every item into one word.
+  const serializeChildren = (node, parts) => {
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === 3) {
+        if (child.textContent.trim()) parts.push(child.textContent);
+        return;
+      }
+      if (child.nodeType !== 1) return;
+      if (BLOCK_TAGS.test(child.tagName)) serializeBlock(child, parts);
+      else {
+        const text = inline({ childNodes: [child] });
+        if (text.trim()) parts.push(text);
+      }
+    });
+  };
+  const serializeBlock = (el, parts) => {
+    const tag = el.tagName;
+    if (/^H[1-6]$/.test(tag)) {
+      parts.push(`${"#".repeat(Number(tag[1]))} ${inline(el)}`);
       return;
     }
-    if (child.nodeType !== 1) return;
-    const tag = child.tagName;
-    if (/^H[1-6]$/.test(tag)) { parts.push(`${"#".repeat(Number(tag[1]))} ${inline(child)}`); return; }
     if (tag === "UL" || tag === "OL") {
-      const out = [];
+      const lines = [];
       let n = 1;
-      child.querySelectorAll(":scope > li").forEach((li) => {
-        out.push(tag === "UL" ? `- ${inline(li)}` : `${n++}. ${inline(li)}`);
+      el.querySelectorAll(":scope > li").forEach((li) => {
+        const nestedBlocks = Array.from(li.children).filter((c) => BLOCK_TAGS.test(c.tagName));
+        const inlineOnly = { childNodes: Array.from(li.childNodes).filter((c) => !(c.nodeType === 1 && BLOCK_TAGS.test(c.tagName))) };
+        lines.push(tag === "UL" ? `- ${inline(inlineOnly)}` : `${n++}. ${inline(inlineOnly)}`);
+        // Nested lists/blocks inside an item flatten to sibling lines.
+        nestedBlocks.forEach((nested) => {
+          const sub = [];
+          serializeBlock(nested, sub);
+          sub.forEach((line) => lines.push(line));
+        });
       });
-      parts.push(out.join("\n"));
+      parts.push(lines.join("\n"));
       return;
     }
     if (tag === "BLOCKQUOTE") {
-      // Quote lines live in per-line <p>/<div> wrappers (both our renderer and
-      // Chromium's Enter produce them); serialize each as its own "> " line.
-      // Structureless legacy content falls back to the flat inline walk.
-      const lineNodes = Array.from(child.childNodes).filter((q) => q.nodeType === 1 && (q.tagName === "P" || q.tagName === "DIV"));
-      const flat = lineNodes.length
-        ? lineNodes.map((q) => inline(q)).join("\n")
-        : inline(child);
+      const sub = [];
+      serializeChildren(el, sub);
+      const flat = sub.length ? sub.join("\n") : inline(el);
       parts.push(flat.split("\n").map((l) => `> ${l}`).join("\n"));
       return;
     }
     if (tag === "HR") { parts.push("---"); return; }
-    if (tag === "P" || tag === "DIV") {
-      const text = inline(child);
-      if (text.trim()) parts.push(text);
-      return;
-    }
-    const text = inline({ childNodes: [child] });
+    // P/DIV: a real paragraph when it only holds inline content; a transparent
+    // container when Chromium nested block elements inside it.
+    const hasBlockChild = Array.from(el.children || []).some((c) => BLOCK_TAGS.test(c.tagName));
+    if (hasBlockChild) { serializeChildren(el, parts); return; }
+    const text = inline(el);
     if (text.trim()) parts.push(text);
-  });
+  };
+  const parts = [];
+  serializeChildren(root, parts);
   return parts.join("\n\n").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
