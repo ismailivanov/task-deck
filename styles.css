@@ -2247,3 +2247,75 @@ body.ot-col-resizing {
 .ot-update-banner button {
   flex: 0 0 auto;
 }
+
+/* ---- Description block editor (Notion/Trello-style) ---- */
+.ot-block-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 170px;
+  padding: 10px 12px 14px;
+  cursor: text;
+}
+.ot-block-text {
+  width: 100%;
+  min-height: 30px;
+  padding: 2px 0;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  resize: none;
+  overflow: hidden;
+  color: var(--text-normal);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.ot-block-text:focus {
+  outline: none;
+}
+.ot-block-image {
+  position: relative;
+  margin: 6px 0;
+  align-self: flex-start;
+  max-width: 100%;
+}
+.ot-block-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 340px;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  object-fit: contain;
+}
+.ot-block-image-remove {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  box-shadow: none;
+  z-index: 2;
+}
+.ot-block-image:hover .ot-block-image-remove {
+  opacity: 1;
+}
+.ot-block-image-remove:hover {
+  background: rgba(200, 40, 40, 0.85);
+}
+.ot-block-image-remove svg {
+  width: 15px;
+  height: 15px;
+}

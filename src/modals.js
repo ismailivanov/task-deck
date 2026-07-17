@@ -1059,7 +1059,9 @@ class CardModal extends Modal {
       if (!isWiki) target = target.split(/\s+/)[0]; // md link: drop optional "title"
       if (!IMG_EXT.test(target)) continue; // not an image link — leave it in the text
       if (match.index > last) segments.push({ type: "md", text: text.slice(last, match.index) });
-      segments.push({ type: "img", target });
+      // Keep the exact original markup so an editor rebuilding the markdown from
+      // segments round-trips wiki AND ![](url) embeds byte-identically.
+      segments.push({ type: "img", target, markup: match[0] });
       last = match.index + match[0].length;
     }
     if (last < text.length) segments.push({ type: "md", text: text.slice(last) });
@@ -1071,6 +1073,8 @@ class CardModal extends Modal {
    * Shows rendered Markdown by default, with a textarea editor on demand.
    */
   renderDetailsField() {
+    // Reset the block-editor caret hook; the edit branch below re-installs it.
+    this.insertDetailAtCaret = null;
     const field = createElement("section", "ot-field ot-details-field");
     const header = createElement("div", "ot-details-heading");
     const heading = createElement("div", "ot-details-heading-title");
@@ -1259,46 +1263,174 @@ class CardModal extends Modal {
       return button;
     };
 
-    const setEditorText = (value, start, end) => {
-      editor.value = value;
-      this.detailsDraft = value;
-      editor.selectionStart = start;
-      editor.selectionEnd = end;
-      renderGallery();
-      editor.focus();
+    // ---- Block editor (Notion/Trello-style) ----
+    // Editing splits the markdown into TEXT blocks (borderless auto-growing
+    // textareas) and IMAGE blocks (real thumbnails with a remove chip), so the
+    // user never sees raw ![[...]] markup. `blocks` is the source of truth while
+    // editing; syncDraft() re-joins it into markdown and mirrors it into the
+    // hidden master textarea (`editor`) that saveDetails/saveNow already read.
+    const blocksHost = createElement("div", "ot-block-editor");
+    let blocks = [];
+    let activeText = null; // { block, ta } of the focused text block
+
+    const buildBlocks = (markdown) => {
+      const built = [];
+      this.splitDetailSegments(String(markdown || "")).forEach((seg) => {
+        if (seg.type === "img") {
+          // Guarantee a text slot before an image so there's always somewhere
+          // to type between/around pictures.
+          if (!built.length || built[built.length - 1].type === "img") built.push({ type: "text", value: "" });
+          built.push({ type: "img", target: seg.target, markup: seg.markup || `![[${seg.target}]]` });
+          return;
+        }
+        const value = seg.text.replace(/^\n+/, "").replace(/\n+$/, "");
+        if (built.length && built[built.length - 1].type === "text") {
+          const prev = built[built.length - 1];
+          prev.value = prev.value && value ? `${prev.value}\n${value}` : (prev.value || value);
+        } else {
+          built.push({ type: "text", value });
+        }
+      });
+      if (!built.length || built[0].type === "img") built.unshift({ type: "text", value: "" });
+      if (built[built.length - 1].type === "img") built.push({ type: "text", value: "" });
+      return built;
+    };
+
+    const joinBlocks = () => {
+      const parts = [];
+      blocks.forEach((block) => {
+        if (block.type === "img") parts.push(block.markup);
+        else if (block.value.trim()) parts.push(block.value.replace(/\n{3,}/g, "\n\n"));
+      });
+      return parts.join("\n\n");
+    };
+
+    const syncDraft = () => {
+      this.detailsDraft = joinBlocks();
+      editor.value = this.detailsDraft;
+    };
+
+    const autosize = (ta) => {
+      ta.style.height = "auto";
+      ta.style.height = `${Math.max(ta.scrollHeight, 30)}px`;
+    };
+
+    const focusedText = () => {
+      if (activeText && blocks.includes(activeText.block) && activeText.ta && activeText.ta.isConnected) return activeText;
+      for (let i = blocks.length - 1; i >= 0; i -= 1) {
+        if (blocks[i].type === "text" && blocks[i]._ta) return { block: blocks[i], ta: blocks[i]._ta };
+      }
+      return null;
+    };
+
+    const setBlockText = (t, value, start, end) => {
+      t.ta.value = value;
+      t.block.value = value;
+      syncDraft();
+      autosize(t.ta);
+      t.ta.focus();
+      t.ta.selectionStart = start;
+      t.ta.selectionEnd = end;
     };
 
     const wrapSelection = (before, after, placeholder) => {
-      const start = editor.selectionStart || 0;
-      const end = editor.selectionEnd || start;
-      const selected = editor.value.slice(start, end) || placeholder;
-      const next = editor.value.slice(0, start) + before + selected + after + editor.value.slice(end);
-      setEditorText(next, start + before.length, start + before.length + selected.length);
+      const t = focusedText();
+      if (!t) return;
+      const start = t.ta.selectionStart || 0;
+      const end = t.ta.selectionEnd || start;
+      const selected = t.ta.value.slice(start, end) || placeholder;
+      const next = t.ta.value.slice(0, start) + before + selected + after + t.ta.value.slice(end);
+      setBlockText(t, next, start + before.length, start + before.length + selected.length);
     };
 
     const prefixLines = (prefix) => {
-      const start = editor.selectionStart || 0;
-      const end = editor.selectionEnd || start;
-      const lineStart = editor.value.lastIndexOf("\n", start - 1) + 1;
-      const lineEndIndex = editor.value.indexOf("\n", end);
-      const lineEnd = lineEndIndex === -1 ? editor.value.length : lineEndIndex;
-      const block = editor.value.slice(lineStart, lineEnd) || "";
+      const t = focusedText();
+      if (!t) return;
+      const start = t.ta.selectionStart || 0;
+      const end = t.ta.selectionEnd || start;
+      const lineStart = t.ta.value.lastIndexOf("\n", start - 1) + 1;
+      const lineEndIndex = t.ta.value.indexOf("\n", end);
+      const lineEnd = lineEndIndex === -1 ? t.ta.value.length : lineEndIndex;
+      const block = t.ta.value.slice(lineStart, lineEnd) || "";
       const nextBlock = block.split("\n").map((line) => (line.startsWith(prefix) ? line : `${prefix}${line || " "}`)).join("\n");
-      const next = editor.value.slice(0, lineStart) + nextBlock + editor.value.slice(lineEnd);
-      setEditorText(next, lineStart, lineStart + nextBlock.length);
+      const next = t.ta.value.slice(0, lineStart) + nextBlock + t.ta.value.slice(lineEnd);
+      setBlockText(t, next, lineStart, lineStart + nextBlock.length);
     };
 
     const insertBlock = (text) => {
-      const start = editor.selectionStart || editor.value.length;
-      const end = editor.selectionEnd || start;
-      const before = editor.value.slice(0, start);
-      const after = editor.value.slice(end);
+      const t = focusedText();
+      if (!t) return;
+      const start = typeof t.ta.selectionStart === "number" ? t.ta.selectionStart : t.ta.value.length;
+      const end = typeof t.ta.selectionEnd === "number" ? t.ta.selectionEnd : start;
+      const before = t.ta.value.slice(0, start);
+      const after = t.ta.value.slice(end);
       const prefix = before && !before.endsWith("\n") ? "\n" : "";
       const suffix = after && !after.startsWith("\n") ? "\n" : "";
       const inserted = `${prefix}${text}${suffix}`;
-      const next = before + inserted + after;
-      setEditorText(next, start + inserted.length, start + inserted.length);
+      setBlockText(t, before + inserted + after, start + inserted.length, start + inserted.length);
     };
+
+    const renderBlocks = () => {
+      blocksHost.replaceChildren();
+      blocks.forEach((block, index) => {
+        if (block.type === "text") {
+          const ta = createElement("textarea", "ot-block-text");
+          ta.value = block.value;
+          ta.rows = 1;
+          if (index === 0) ta.placeholder = blocks.length === 1 ? "Write a description..." : "";
+          ta.addEventListener("input", () => {
+            block.value = ta.value;
+            syncDraft();
+            autosize(ta);
+          });
+          ta.addEventListener("focus", () => { activeText = { block, ta }; });
+          ta.addEventListener("paste", handlePaste);
+          block._ta = ta;
+          blocksHost.append(ta);
+          requestAnimationFrame(() => autosize(ta));
+          return;
+        }
+        const wrap = createElement("div", "ot-block-image");
+        const resolved = this.plugin.resolveCardImage(this.card, block.target);
+        if (resolved && resolved.src) {
+          const img = createElement("img", "");
+          img.src = resolved.src;
+          img.alt = resolved.name || "";
+          img.loading = "lazy";
+          wrap.append(img);
+        } else {
+          wrap.append(createElement("span", "ot-image-missing", block.target.split("/").pop() || "image"));
+        }
+        const remove = iconButton("trash", "Remove image", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const at = blocks.indexOf(block);
+          if (at === -1) return;
+          blocks.splice(at, 1);
+          // Merge the text blocks the image used to separate.
+          if (at > 0 && at < blocks.length && blocks[at - 1].type === "text" && blocks[at].type === "text") {
+            const merged = [blocks[at - 1].value, blocks[at].value].filter((part) => part.trim());
+            blocks[at - 1].value = merged.join("\n\n");
+            blocks.splice(at, 1);
+          }
+          syncDraft();
+          renderBlocks();
+        });
+        remove.classList.add("ot-block-image-remove");
+        wrap.append(remove);
+        blocksHost.append(wrap);
+      });
+    };
+
+    // Clicking the frame's empty space puts the caret in the nearest text block.
+    blocksHost.addEventListener("click", (event) => {
+      if (event.target !== blocksHost) return;
+      const t = focusedText();
+      if (t && t.ta) {
+        t.ta.focus();
+        t.ta.selectionStart = t.ta.selectionEnd = t.ta.value.length;
+      }
+    });
 
     // Paste or drop an image straight into the notes: it's saved into the vault
     // (respecting the attachment-folder setting) and embedded compactly.
@@ -1360,12 +1492,43 @@ class CardModal extends Modal {
       );
       toolbar.append(leftTools, rightTools);
 
-      const editorFrame = createElement("div", "ot-trello-editor");
-      editor.classList.remove("is-hidden");
-      editor.addEventListener("input", () => {
-        this.detailsDraft = editor.value;
-      });
-      editor.addEventListener("paste", handlePaste);
+      const editorFrame = createElement("div", "ot-trello-editor ot-block-frame");
+      // The master textarea stays hidden: it only mirrors the joined markdown so
+      // saveDetails / insertImageFromFile keep reading the same place as before.
+      blocks = buildBlocks(this.detailsDraft);
+      syncDraft();
+      renderBlocks();
+
+      // An image pasted/attached while editing lands at the active block's caret,
+      // splitting the text so the picture renders inline immediately — the user
+      // never sees ![[...]] markup.
+      this.insertDetailAtCaret = (markup) => {
+        const t = focusedText();
+        if (!t) return false;
+        const caret = typeof t.ta.selectionStart === "number" ? t.ta.selectionStart : t.ta.value.length;
+        const beforeText = t.ta.value.slice(0, caret);
+        const afterText = t.ta.value.slice(caret);
+        const at = blocks.indexOf(t.block);
+        if (at === -1) return false;
+        const seg = this.splitDetailSegments(markup).find((s) => s.type === "img");
+        blocks.splice(
+          at,
+          1,
+          { type: "text", value: beforeText },
+          { type: "img", target: (seg && seg.target) || markup, markup },
+          { type: "text", value: afterText }
+        );
+        syncDraft();
+        renderBlocks();
+        const nextBlock = blocks[at + 2];
+        requestAnimationFrame(() => {
+          if (nextBlock && nextBlock._ta) {
+            nextBlock._ta.focus();
+            nextBlock._ta.selectionStart = nextBlock._ta.selectionEnd = 0;
+          }
+        });
+        return true;
+      };
 
       const actions = createElement("div", "ot-details-actions");
       const save = createElement("button", "mod-cta", "Save");
@@ -1379,9 +1542,15 @@ class CardModal extends Modal {
       actions.append(save, cancel);
 
       header.append(heading);
-      editorFrame.append(toolbar, editor);
-      field.append(header, editorFrame, actions, imageInput);
-      requestAnimationFrame(() => editor.focus());
+      editorFrame.append(toolbar, blocksHost);
+      field.append(header, editorFrame, actions, imageInput, editor);
+      requestAnimationFrame(() => {
+        const t = focusedText();
+        if (t && t.ta) {
+          t.ta.focus();
+          t.ta.selectionStart = t.ta.selectionEnd = t.ta.value.length;
+        }
+      });
       return field;
     }
 
@@ -1511,6 +1680,9 @@ class CardModal extends Modal {
    */
   insertDetailText(text) {
     if (this.readOnly) return false;
+    // Block editor open: let it place the embed at the active block's caret and
+    // render it as a real image immediately.
+    if (this.editingDetails && this.insertDetailAtCaret) return this.insertDetailAtCaret(text);
     const ta = this.detailsTextarea;
     // In the editor, drop the embed at the caret so it lands where you're typing.
     if (this.editingDetails && ta && !ta.classList.contains("is-hidden")) {
