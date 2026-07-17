@@ -203,6 +203,52 @@ function stripImageEmbeds(markdown) {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Resizable embeds store their width in Obsidian's own image-size syntax:
+// ![[img.png|300]] for wiki embeds, ![alt|300](url) for markdown embeds — so a
+// resized card image renders at the same width when the note opens in Obsidian.
+const IMAGE_SIZE_RE = /^(\d+)(x\d+)?$/i;
+
+// Width (px) stored in an image embed's markup, or null when unsized.
+function imageSizeFromMarkup(markup) {
+  const text = String(markup || "");
+  let candidate = null;
+  const wiki = text.match(/^!\[\[([^\]]+)\]\]$/);
+  if (wiki) {
+    const parts = wiki[1].split("|");
+    if (parts.length > 1) candidate = parts[parts.length - 1];
+  } else {
+    const md = text.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    if (md) candidate = md[1].split("|").pop();
+  }
+  if (!candidate) return null;
+  const match = candidate.trim().match(IMAGE_SIZE_RE);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+// Returns the embed markup with its size segment set to `width` px; a falsy
+// width clears the size so the image renders at its natural/full width. Only
+// a trailing size-like segment is touched — aliases and titles survive.
+function imageMarkupWithSize(markup, width) {
+  const text = String(markup || "");
+  const size = width > 0 ? String(Math.round(width)) : "";
+  const wiki = text.match(/^!\[\[([^\]]+)\]\]$/);
+  if (wiki) {
+    const parts = wiki[1].split("|");
+    if (parts.length > 1 && IMAGE_SIZE_RE.test(parts[parts.length - 1].trim())) parts.pop();
+    if (size) parts.push(size);
+    return `![[${parts.join("|")}]]`;
+  }
+  const md = text.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+  if (md) {
+    const parts = md[1].split("|");
+    if (IMAGE_SIZE_RE.test(parts[parts.length - 1].trim())) parts.pop();
+    const alt = parts.join("|").trim();
+    const sized = size ? (alt ? `${alt}|${size}` : size) : alt;
+    return `![${sized}](${md[2]})`;
+  }
+  return text;
+}
+
 function createElement(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -633,6 +679,8 @@ module.exports = {
   isImagePath,
   imageRefsFromMarkdown,
   stripImageEmbeds,
+  imageSizeFromMarkup,
+  imageMarkupWithSize,
   createElement,
   hasDragType,
   iconButton,

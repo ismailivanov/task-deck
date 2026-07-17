@@ -1546,9 +1546,15 @@
 
 .ot-inline-image {
   position: relative;
+  /* Flow side by side: consecutive images wrap like a grid once resized down. */
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+  margin: 4px 8px 4px 0;
 }
 .ot-inline-image img {
   cursor: default;
+  margin: 0;
 }
 /* Copy-image chip: appears over the image on hover, top-right. */
 .ot-image-copy {
@@ -1580,6 +1586,52 @@
 .ot-image-copy svg {
   width: 15px;
   height: 15px;
+}
+
+/* Resize grip: Notion-style bar on the image's right edge (hover to reveal,
+   always visible while dragging and on touch screens). */
+.ot-img-resize {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 44px;
+  max-height: 45%;
+  padding: 0;
+  border-radius: 4px;
+  background: rgba(15, 15, 15, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 3;
+  touch-action: none;
+}
+.ot-inline-image:hover .ot-img-resize,
+.ot-block-image:hover .ot-img-resize,
+.ot-img-resize.is-dragging {
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  .ot-img-resize {
+    opacity: 0.85;
+  }
+}
+/* Live width readout while dragging. */
+.ot-img-size-chip {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+  pointer-events: none;
+  z-index: 3;
 }
 
 .ot-image-missing {
@@ -2284,9 +2336,9 @@ body.ot-col-resizing {
 
 /* ---- Description block editor (Notion/Trello-style) ---- */
 .ot-block-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  /* Block flow (not flex): image blocks are inline-block, so consecutive
+     images sit side by side and wrap like a grid once resized down. */
+  display: block;
   min-height: 170px;
   padding: 10px 12px 14px;
   cursor: text;
@@ -2305,6 +2357,14 @@ body.ot-col-resizing {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* Empty text slot between two images: a slim clickable strip that keeps the
+   images side by side; typing expands it back to a full row. */
+.ot-block-text--slim {
+  display: inline-block;
+  width: auto;
+  min-width: 12px;
+  vertical-align: top;
 }
 .ot-block-text:focus {
   outline: none !important;
@@ -2365,8 +2425,9 @@ body.ot-col-resizing {
 }
 .ot-block-image {
   position: relative;
-  margin: 6px 0;
-  align-self: flex-start;
+  display: inline-block;
+  vertical-align: top;
+  margin: 4px 8px 4px 0;
   max-width: 100%;
 }
 .ot-block-image img {

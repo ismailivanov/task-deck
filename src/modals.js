@@ -19,6 +19,8 @@ const {
   fieldDateLabel,
   iconButton,
   imageRefsFromMarkdown,
+  imageSizeFromMarkup,
+  imageMarkupWithSize,
   isoFromDate,
   labelKey,
   stripImageEmbeds,
@@ -1226,8 +1228,9 @@ class CardModal extends Modal {
       if (!IMG_EXT.test(target)) continue; // not an image link — leave it in the text
       if (match.index > last) segments.push({ type: "md", text: text.slice(last, match.index) });
       // Keep the exact original markup so an editor rebuilding the markdown from
-      // segments round-trips wiki AND ![](url) embeds byte-identically.
-      segments.push({ type: "img", target, markup: match[0] });
+      // segments round-trips wiki AND ![](url) embeds byte-identically. start/end
+      // let callers splice a resized embed back into the source string safely.
+      segments.push({ type: "img", target, markup: match[0], start: match.index, end: match.index + match[0].length });
       last = match.index + match[0].length;
     }
     if (last < text.length) segments.push({ type: "md", text: text.slice(last) });
@@ -1341,6 +1344,27 @@ class CardModal extends Modal {
             });
             copyButton.classList.add("ot-image-copy");
             wrap.append(copyButton);
+            this.applyStoredImageWidth(img, seg.markup);
+            // Resize straight from the read view — the width is stored in the
+            // note's embed markup (Obsidian's |300 syntax), so it renders the
+            // same when the card note opens in Obsidian.
+            if (!this.readOnly) {
+              this.enableImageResize(wrap, img, {
+                getMarkup: () => seg.markup,
+                onCommit: async (width) => {
+                  const next = imageMarkupWithSize(seg.markup, width);
+                  if (next === seg.markup) return;
+                  // Splice at the segment's own offsets — replacing by string
+                  // would hit the wrong copy when the same image (and size)
+                  // appears twice in one note.
+                  const source = this.localDetails;
+                  this.localDetails = source.slice(0, seg.start) + next + source.slice(seg.end);
+                  seg.markup = next;
+                  await this.saveNow();
+                  renderPreview();
+                },
+              });
+            }
           } else {
             wrap.append(createElement("span", "ot-image-missing", seg.target.split("/").pop() || "image"));
           }
@@ -1570,10 +1594,18 @@ class CardModal extends Modal {
           if (index === 0 && blocks.length === 1) ce.dataset.placeholder = "Write a description...";
           const refreshEmpty = () => { ce.dataset.empty = ce.textContent.trim() ? "false" : "true"; };
           refreshEmpty();
+          // An empty text slot wedged between two images collapses to a slim
+          // clickable strip so consecutive images sit side by side like a grid;
+          // typing in it expands it back to a full row — matching the read
+          // view, where text between two embeds breaks the image flow.
+          const betweenImages = !!(blocks[index - 1] && blocks[index - 1].type === "img" && blocks[index + 1] && blocks[index + 1].type === "img");
+          const refreshSlim = () => { ce.classList.toggle("ot-block-text--slim", betweenImages && !ce.textContent.trim()); };
+          refreshSlim();
           ce.addEventListener("input", () => {
             block.value = detailsHtmlToMd(ce);
             syncDraft();
             refreshEmpty();
+            refreshSlim();
           });
           ce.addEventListener("focus", () => { activeText = { block, ce }; });
           // Escape hatch for quotes and lists (Notion behavior): pressing Enter
@@ -1630,6 +1662,16 @@ class CardModal extends Modal {
           img.alt = resolved.name || "";
           img.loading = "lazy";
           wrap.append(img);
+          this.applyStoredImageWidth(img, block.markup);
+          // Drag-resize rewrites the block's markup in place; joinBlocks picks
+          // it up on the next keystroke, and Save persists it like any edit.
+          this.enableImageResize(wrap, img, {
+            getMarkup: () => block.markup,
+            onCommit: (width) => {
+              block.markup = imageMarkupWithSize(block.markup, width);
+              syncDraft();
+            },
+          });
         } else {
           wrap.append(createElement("span", "ot-image-missing", block.target.split("/").pop() || "image"));
         }
@@ -1901,6 +1943,87 @@ class CardModal extends Modal {
     await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
   }
 
+  // Applies the width stored in an embed's markup (Obsidian's |300 syntax) to a
+  // rendered <img>. An explicit width lifts the height cap: the size is the
+  // user's choice, so tall images must not be letterboxed by max-height.
+  applyStoredImageWidth(img, markup) {
+    const width = imageSizeFromMarkup(markup);
+    if (width) {
+      img.style.width = `${width}px`;
+      img.style.maxHeight = "none";
+    }
+  }
+
+  /**
+   * Notion-style image resize: a grip on the image's right edge. Dragging
+   * resizes the live <img> (with a px chip); on release the width is committed
+   * through onCommit(width) — 0 meaning "clear the size" when dragged to full
+   * width — which rewrites the embed markup via imageMarkupWithSize, so the
+   * size persists in the note and renders identically in Obsidian. Consecutive
+   * images flow side by side, so sizing two down makes an instant grid.
+   */
+  enableImageResize(wrap, img, options) {
+    const { getMarkup, onCommit } = options;
+    const handle = createElement("div", "ot-img-resize");
+    handle.title = "Drag to resize";
+    handle.setAttribute("aria-label", "Resize image");
+    const chip = createElement("div", "ot-img-size-chip is-hidden");
+    wrap.append(handle, chip);
+
+    let drag = null;
+    const finishDrag = (commit) => {
+      if (!drag) return;
+      const { width, maxWidth } = drag;
+      drag = null;
+      handle.classList.remove("is-dragging");
+      chip.classList.add("is-hidden");
+      if (!commit) {
+        // Interrupted drag — fall back to whatever the markup still says.
+        img.style.width = "";
+        img.style.maxHeight = "";
+        this.applyStoredImageWidth(img, getMarkup());
+        return;
+      }
+      // At (practically) the container's width, storing no size renders the
+      // same — and keeps big future layouts full-width.
+      const finalWidth = width >= maxWidth - 2 ? 0 : width;
+      if (!finalWidth) {
+        img.style.width = "";
+        img.style.maxHeight = "";
+      }
+      Promise.resolve(onCommit(finalWidth)).catch(console.error);
+    };
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const container = wrap.parentElement;
+      const maxWidth = Math.max(160, (container ? container.clientWidth : 1200) - 4);
+      const startWidth = img.getBoundingClientRect().width;
+      drag = { startX: event.clientX, startWidth, maxWidth, width: Math.round(startWidth) };
+      handle.classList.add("is-dragging");
+      chip.classList.remove("is-hidden");
+      chip.textContent = `${drag.width}px`;
+      try { handle.setPointerCapture(event.pointerId); } catch (error) { /* older engines */ }
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      event.preventDefault();
+      const width = Math.min(drag.maxWidth, Math.max(100, Math.round(drag.startWidth + event.clientX - drag.startX)));
+      if (width === drag.width) return;
+      drag.width = width;
+      img.style.width = `${width}px`;
+      img.style.maxHeight = "none";
+      chip.textContent = `${width}px`;
+    });
+    handle.addEventListener("pointerup", (event) => {
+      try { handle.releasePointerCapture(event.pointerId); } catch (error) { /* not captured */ }
+      finishDrag(true);
+    });
+    handle.addEventListener("pointercancel", () => finishDrag(false));
+  }
+
   // Export this card as a clean, print-styled PDF (title, board/list, labels,
   // members, dates, description with embedded images, checklist). Desktop only:
   // renders self-contained HTML in a hidden BrowserWindow and uses Electron's
@@ -1933,7 +2056,10 @@ class CardModal extends Modal {
               const bin = await this.app.vault.readBinary(resolved.file);
               const ext = (resolved.file.extension || "png").toLowerCase();
               const mime = ext === "svg" ? "image/svg+xml" : (ext === "jpg" ? "image/jpeg" : `image/${ext}`);
-              descriptionParts.push(`<img src="data:${mime};base64,${arrayBufferToBase64(bin)}">`);
+              // Keep the note's stored width (print CSS still caps at page width).
+              const imgWidth = imageSizeFromMarkup(seg.markup);
+              const sizing = imgWidth ? ` style="width:${imgWidth}px"` : "";
+              descriptionParts.push(`<img src="data:${mime};base64,${arrayBufferToBase64(bin)}"${sizing}>`);
             } catch (error) {
               // unreadable image — skip it rather than fail the export
             }
