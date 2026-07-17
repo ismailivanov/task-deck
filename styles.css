@@ -1473,6 +1473,40 @@
   padding-inline-start: 1.5em;
 }
 
+/* Read-view parity with the WYSIWYG editor: Obsidian scopes its own markdown
+   styles to its views, so quotes/code/rules rendered in this modal preview get
+   NO styling from the theme — a "> quote" looked like plain text in read mode
+   while showing a proper quote bar in edit mode. Mirror the editor's styles. */
+.ot-markdown-preview blockquote {
+  margin: 0.35em 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.ot-markdown-preview code {
+  background: var(--background-modifier-border);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.ot-markdown-preview hr {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ot-markdown-preview h1,
+.ot-markdown-preview h2,
+.ot-markdown-preview h3,
+.ot-markdown-preview h4,
+.ot-markdown-preview h5,
+.ot-markdown-preview h6 {
+  margin: 0.5em 0 0.25em;
+  font-weight: 700;
+}
+.ot-markdown-preview h3 {
+  font-size: 1.12em;
+}
+
 /* Inline images: fill the description width, keep aspect, sensible height —
    part of the flowing document, like a Trello attachment. */
 .ot-markdown-preview img,
