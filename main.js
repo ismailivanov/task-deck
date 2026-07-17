@@ -754,7 +754,10 @@ function detailsMdToHtml(markdown) {
         quoted.push(inlineMdToHtml(lines[i].replace(/^>\s?/, "")));
         i += 1;
       }
-      html.push(`<blockquote>${quoted.join("<br>")}</blockquote>`);
+      // One <p> per quoted line (empty lines keep a <br> so they hold a caret):
+      // per-line wrappers are what lets the editor's Enter-on-empty-line escape
+      // detect the current line inside the quote.
+      html.push(`<blockquote>${quoted.map((q) => `<p>${q || "<br>"}</p>`).join("")}</blockquote>`);
       continue;
     }
     para.push(line);
@@ -803,7 +806,14 @@ function detailsHtmlToMd(root) {
       return;
     }
     if (tag === "BLOCKQUOTE") {
-      parts.push(inline(child).split("\n").map((l) => `> ${l}`).join("\n"));
+      // Quote lines live in per-line <p>/<div> wrappers (both our renderer and
+      // Chromium's Enter produce them); serialize each as its own "> " line.
+      // Structureless legacy content falls back to the flat inline walk.
+      const lineNodes = Array.from(child.childNodes).filter((q) => q.nodeType === 1 && (q.tagName === "P" || q.tagName === "DIV"));
+      const flat = lineNodes.length
+        ? lineNodes.map((q) => inline(q)).join("\n")
+        : inline(child);
+      parts.push(flat.split("\n").map((l) => `> ${l}`).join("\n"));
       return;
     }
     if (tag === "HR") { parts.push("---"); return; }
@@ -2222,7 +2232,14 @@ class CardModal extends Modal {
             const listItem = el.closest("li");
             const quote = el.closest("blockquote");
             if (!listItem && !quote) return;
-            const line = listItem || el.closest("p, div") || quote;
+            // The "current line" must be a wrapper INSIDE the quote - closest()
+            // can walk past a structureless quote up to the editor root, whose
+            // textContent is the whole block (the escape would never fire there).
+            let line = listItem;
+            if (!line) {
+              const candidate = el.closest("p, div");
+              line = candidate && quote.contains(candidate) && candidate !== quote ? candidate : quote;
+            }
             if ((line.textContent || "").replace(/\u00a0/g, " ").trim()) return; // line has content — normal Enter
             event.preventDefault();
             document.execCommand("outdent");
