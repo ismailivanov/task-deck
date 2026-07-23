@@ -357,6 +357,13 @@
   transform: translateY(-1px);
 }
 
+/* Board re-renders replace every card element wholesale (see BoardView.render());
+   without this, a card sitting under the cursor would replay its hover-in
+   transition every time you click something, looking like a double-click flash. */
+.ot-card.ot-card-no-transition {
+  transition: none;
+}
+
 .ot-card.is-drop-target {
   border-color: var(--interactive-accent);
 }
@@ -1767,7 +1774,13 @@
 
 .ot-checklist-row {
   display: grid;
-  grid-template-columns: 26px 20px minmax(0, 1fr) 30px;
+  /* Three columns: [checkbox] [text input flex-grow] [remove button].
+     The old layout reserved a 26px assignee column that was never
+     populated (assignees UI is intentionally hidden in this fork), so the
+     text input was squeezed into the 20px checkbox slot and shown as a
+     one-character-wide box. Dropping the phantom column lets the input
+     take the remaining width, matching the rest of the modal. */
+  grid-template-columns: 20px minmax(0, 1fr) 30px;
   align-items: center;
   gap: 8px;
   min-height: 32px;
@@ -1853,6 +1866,15 @@
   width: 100%;
 }
 
+.ot-checklist-add-input {
+  resize: none;
+  overflow: hidden;
+  min-height: 30px;
+  max-height: 220px;
+  line-height: 1.4;
+  font-family: inherit;
+}
+
 .is-hidden {
   display: none;
 }
@@ -1906,6 +1928,38 @@
   .ot-details-toolbar-group {
     flex-wrap: wrap;
   }
+}
+
+/* Trello-style itemized checklist shown on the card front. */
+.ot-card-checklist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0;
+}
+
+.ot-card-checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.ot-card-checklist-item input[type="checkbox"] {
+  margin: 3px 0 0;
+  flex-shrink: 0;
+}
+
+.ot-card-checklist-item-text {
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--text-normal);
+}
+
+.ot-card-checklist-item.is-done .ot-card-checklist-item-text {
+  color: var(--text-muted);
+  text-decoration: line-through;
 }
 
 /* Card member assignment (avatars). */
@@ -2521,4 +2575,254 @@ body.ot-col-resizing {
 .ot-block-image-remove svg {
   width: 15px;
   height: 15px;
+}
+
+/* Nextcloud Deck: settings + conflict modal */
+
+.ot-settings-inline-status {
+  margin: 4px 0 12px 0;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.ot-conflict-intro {
+  margin: 0 0 12px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.ot-conflict-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 1fr;
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 10px;
+}
+
+.ot-conflict-field-name {
+  padding-top: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.ot-conflict-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 12px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.ot-conflict-choice:hover {
+  border-color: var(--interactive-accent);
+}
+
+.ot-conflict-choice.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.ot-conflict-preview {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.ot-conflict-preview.is-empty {
+  font-style: italic;
+}
+
+.ot-conflict-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* Sync log viewer */
+
+.ot-sync-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ot-sync-log-summary {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.ot-sync-log-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.ot-sync-log-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.ot-sync-log-row {
+  display: grid;
+  grid-template-columns: 80px 160px 1fr;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 12px;
+}
+
+.ot-sync-log-row:first-child { border-top: none; }
+
+.ot-sync-log-row.is-error {
+  background: var(--background-modifier-error);
+  color: var(--text-on-accent);
+}
+
+.ot-sync-log-time { color: var(--text-muted); }
+
+.ot-sync-log-event {
+  font-family: var(--font-monospace);
+  color: var(--text-normal);
+}
+
+.ot-sync-log-summary-cell {
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ot-sync-log-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ---- Card modal: Attachments panel ------------------------------------ */
+.ot-attachments-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ot-attachments-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ot-attachments-heading .ot-attachments-icon {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.ot-attachments-count {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+.ot-attachments-heading > button {
+  margin-left: auto;
+}
+.ot-attachments-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+.ot-attachments-empty {
+  color: var(--text-muted);
+  padding: 8px;
+  text-align: center;
+  font-style: italic;
+}
+.ot-attachment-tile {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--background-primary);
+}
+.ot-attachment-tile.is-pending {
+  border-style: dashed;
+}
+.ot-attachment-thumb {
+  aspect-ratio: 16 / 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
+  overflow: hidden;
+}
+.ot-attachment-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: cover;
+}
+.ot-attachment-icon {
+  font-size: 28px;
+  color: var(--text-muted);
+  display: inline-flex;
+}
+.ot-attachment-meta {
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ot-attachment-name {
+  font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ot-attachment-pending {
+  font-size: 0.75em;
+  color: var(--text-accent);
+  font-style: italic;
+}
+.ot-attachment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 4px 6px;
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+
+/* Support section caption — small link tucked under the "Buy me a coffee"
+   row. The parent .setting-item is display:flex row; we absolutely place
+   the caption so it lines up right-bottom without disrupting the button. */
+.ot-settings-support-caption {
+  position: absolute;
+  right: 0;
+  bottom: -4px;
+  font-size: 0.75em;
+  color: var(--text-muted);
+}
+.ot-settings-support-caption a {
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+.ot-settings-support-caption a:hover {
+  color: var(--text-normal);
+}
+/* Make the setting-item positioned so absolute caption anchors here. */
+.setting-item:has(.ot-settings-support-caption) {
+  position: relative;
+  padding-bottom: 22px;
 }

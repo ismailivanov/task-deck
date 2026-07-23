@@ -4,6 +4,7 @@ const { Notice, Plugin, addIcon, requestUrl } = require("obsidian");
 const {
   BOARD_INDEX_MARKER,
   DEFAULT_DATA,
+  DEFAULT_NEXTCLOUD,
   LEGACY_BOARD_INDEX_SUFFIX,
   LEGACY_CARD_FOLDER,
   LIST_COLORS,
@@ -32,6 +33,13 @@ const { BoardView } = require("./board-view");
 const { COMPLETION_SOUND_URL } = require("./completion-sound");
 const { TextPromptModal } = require("./modals");
 const { TaskDeckSettingTab } = require("./settings-tab");
+const {
+  decryptAppPassword,
+  encryptAppPassword,
+  revokeAppPassword,
+} = require("./nextcloud-auth");
+const { DeckClient } = require("./deck-client");
+const { SyncManager } = require("./sync-manager");
 
 /**
  * Main plugin controller.
@@ -46,17 +54,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     // the board view. Heavy vault I/O is deferred to onLayoutReady below.
     await this.loadPluginData();
 
-    // Live "someone else is editing this card" locks, keyed by card id. Filled
-    // from the SyncDeck presence roster; read by the board and the card modal.
-    this.cardLocks = new Map();
-    this.editingCardId = null;
-
     // The exact Markdown we last read from (or wrote to) each card file, keyed by
     // card id. writeCardFile compares against it so a note another device just
     // delivered is never clobbered by our (possibly stale) in-memory card.
     this.diskSignatures = new Map();
     // Same optimistic-concurrency guard for each board's generated index file, so
-    // a stale startup rewrite never reverts an index Sync Deck just pulled in
+    // a stale startup rewrite never reverts an index a Nextcloud pull just wrote
     // (boardId -> the exact index Markdown we last read from / wrote to disk).
     this.indexSignatures = new Map();
     this.pendingResync = false;
@@ -74,6 +77,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     ["create", "modify", "rename", "delete"].forEach((eventName) => {
       this.registerEvent(this.app.vault.on(eventName, (file) => this.queueCardFolderSync(file, eventName)));
     });
+    // Independently, watch for local attachment deletions/renames so the sync
+    // manager can enqueue a Deck-side delete on the next tick. These events
+    // are ignored when the deleted file isn't inside a tracked card's
+    // attachments/ directory.
+    this.registerEvent(this.app.vault.on("delete", (file) => this.handleAttachmentDelete(file)));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleAttachmentRename(file, oldPath)));
 
     // Reconcile card notes AFTER the workspace + metadata cache are ready, and
     // never let it reject onload(): a startup file error used to crash onload and
@@ -83,14 +92,20 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
         console.error("Task Deck: startup vault reconcile failed", error);
         new Notice("Task Deck loaded, but reconciling notes hit an error. Your boards are intact.");
       });
+      // Trigger a single initial pull on startup once the vault has settled.
+      // The recurring schedule (if enabled) is set up separately by
+      // reconfigureAutoSync at the end of onload — no more competing timers.
+      if (this.isNextcloudEnabled()) {
+        this.runNextcloudSync().catch(() => {});
+      }
     });
 
     // Boards sync themselves: vault events reconcile on change, and this periodic
-    // safety net re-imports every ~30s so remote edits (pulled by Sync Deck) show
-    // up even if an event is missed. Skipped while reconciling or editing a card,
-    // so it never disrupts the user. The manual "Sync" button still works too.
+    // safety net re-imports every ~30s so remote edits (pulled by Nextcloud Deck
+    // sync) show up even if an event is missed. The manual "Sync" button still
+    // works too.
     this.registerInterval(window.setInterval(() => {
-      if (this.reconciling || this.editingCardId) return;
+      if (this.reconciling) return;
       const before = JSON.stringify(this.data.boards);
       Promise.resolve(this.syncCardsFromFolder())
         .then(() => { if (JSON.stringify(this.data.boards) !== before) this.refreshViews(); })
@@ -98,6 +113,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     }, 30000));
 
     this.addRibbonIcon(TASK_DECK_ICON, "Open Task Deck", () => this.activateView());
+    // Second ribbon: quick-access "Sync with Nextcloud" button. Exposing this
+    // outside of the settings tab shortens the loop for the most common
+    // interactive action. Only shown when Nextcloud is configured — otherwise
+    // it would silently do nothing.
+    this.nextcloudRibbonIcon = null;
+    this.updateNextcloudRibbon();
     // Fire-and-forget update check (manual installs get no store prompt).
     this.checkForUpdate();
     this.addCommand({
@@ -125,6 +146,27 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       name: "Undo last change",
       callback: () => this.undoLast(),
     });
+    this.addCommand({
+      id: "sync-with-nextcloud",
+      name: "Sync with Nextcloud Deck",
+      callback: async () => {
+        if (!this.isNextcloudEnabled()) {
+          new Notice("Nextcloud is not connected. Open Settings → Nextcloud sync to sign in.");
+          return;
+        }
+        const status = await this.runNextcloudSync({ manual: true });
+        if (status && status.state === "error") new Notice(`Sync failed: ${status.message}`);
+        else if (status && status.message) new Notice(status.message);
+      },
+    });
+    this.addCommand({
+      id: "view-sync-log",
+      name: "View Nextcloud sync log",
+      callback: () => {
+        const { SyncLogModal } = require("./sync-log-modal");
+        new SyncLogModal(this.app, this).open();
+      },
+    });
     // Cmd/Ctrl+Z undoes the last board/table edit — but only while a Task Deck
     // board is the active view and the focus isn't in a text field (so it never
     // steals undo from note editing or an input).
@@ -138,6 +180,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       event.preventDefault();
       this.undoLast();
     });
+
+    // Kick off the auto-sync scheduler last, once the rest of onload has
+    // wired up the sync manager and data. Safe no-op when disabled.
+    this.reconfigureAutoSync();
   }
 
   recordUndo(inverse) {
@@ -197,7 +243,62 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   async onunload() {
     if (this.explorerColorStyleEl) this.explorerColorStyleEl.remove();
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+    if (this.autoSyncTimer) {
+      window.clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
+    // Do NOT detach the plugin's leaves on unload. Obsidian's policy is that
+    // the workspace should survive plugin reloads (BRAT / dev refresh),
+    // and detachLeavesOfType would silently close every open board tab
+    // during a hot reload. Registered views are torn down by the base
+    // Plugin class automatically.
+  }
+
+  /**
+   * Show/hide the "Sync with Nextcloud" ribbon icon based on whether the
+   * plugin is actually connected. Called after settings changes so the
+   * icon appears immediately when the user signs in and disappears when
+   * they sign out.
+   */
+  updateNextcloudRibbon() {
+    const shouldShow = this.isNextcloudEnabled();
+    if (shouldShow && !this.nextcloudRibbonIcon) {
+      this.nextcloudRibbonIcon = this.addRibbonIcon("refresh-cw", "Sync with Nextcloud Deck", async () => {
+        const status = await this.runNextcloudSync({ manual: true });
+        if (status && status.state === "error") new Notice(`Sync failed: ${status.message}`);
+        else if (status && status.message) new Notice(status.message);
+      });
+    } else if (!shouldShow && this.nextcloudRibbonIcon) {
+      this.nextcloudRibbonIcon.remove();
+      this.nextcloudRibbonIcon = null;
+    }
+  }
+
+  /**
+   * (Re)start the periodic auto-sync timer. Called from onload, settings
+   * save, and after successful sign-in/out so the schedule reflects the
+   * current settings without needing a plugin reload.
+   */
+  reconfigureAutoSync() {
+    if (this.autoSyncTimer) {
+      window.clearInterval(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
+    const nc = this.data && this.data.nextcloud;
+    if (!nc || !nc.autoSyncEnabled || !this.isNextcloudEnabled()) return;
+    // Clamp to at least a minute — running more often than that has no
+    // practical benefit and would hammer the Nextcloud instance.
+    const minutes = Math.max(1, Number(nc.autoSyncMinutes) || 15);
+    const ms = minutes * 60 * 1000;
+    this.autoSyncTimer = window.setInterval(() => {
+      // Skip if a sync is already in progress or if the window is offline.
+      if (this.nextcloudSyncInFlight) return;
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      this.runNextcloudSync({ manual: false }).catch((error) => {
+        console.error("Auto sync failed", error);
+      });
+    }, ms);
+    this.registerInterval(this.autoSyncTimer);
   }
 
   /**
@@ -212,6 +313,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.labels = this.data.labels || [];
     this.data.completionSound = this.data.completionSound !== false;
     this.data.compactLabels = !!this.data.compactLabels;
+    this.data.showChecklistOnCards = !!this.data.showChecklistOnCards;
+    // Merge saved Nextcloud config on top of the default so a schema addition
+    // never leaves a required field undefined. Keys not in DEFAULT_NEXTCLOUD are
+    // dropped to avoid stale flags from older versions leaking through.
+    const savedNextcloud = (saved && saved.nextcloud) || {};
+    this.data.nextcloud = Object.assign({}, DEFAULT_NEXTCLOUD, savedNextcloud);
     this.data.labels = this.normalizeGlobalLabels(this.data.labels);
     this.data.boards = this.data.boards.map((board) => this.normalizeBoard(board));
     this.loadNeedsSave = this.ensureListColors();
@@ -221,9 +328,19 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       card.completed = !!card.completed;
       card.startDate = cleanDate(card.startDate);
       card.dueDate = cleanDate(card.dueDate);
+      // Sync metadata (populated by Nextcloud sync). Kept nullable so an
+      // unbound board's cards stay lightweight in data.json.
+      if (card.remoteId === undefined) card.remoteId = null;
+      if (card.etag === undefined) card.etag = null;
+      if (card.remoteUpdatedAt === undefined) card.remoteUpdatedAt = 0;
+      if (card.baseline === undefined) card.baseline = null;
+      if (card.localDirty === undefined) card.localDirty = false;
+      if (!Array.isArray(card.attachments)) card.attachments = [];
     });
     this.data.boards.forEach((board) => {
       board.folderPath = board.folderPath || this.inferBoardFolder(board) || cardFileBaseName(board.name);
+      if (board.remoteId === undefined) board.remoteId = null;
+      if (board.etag === undefined) board.etag = null;
     });
     this.data.activeBoardId = this.findBoard(this.data.activeBoardId)
       ? this.data.activeBoardId
@@ -241,7 +358,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.reconciling = true;
     try {
       const restored = await this.restoreBoardsFromIndexFiles();
-      // A Sync Deck vault switch trashes the PREVIOUS vault's board folders, but
+      // Switching vaults (or a fresh Nextcloud pull) can leave the PREVIOUS
+      // vault's board folders trashed, but
       // our per-device data.json still lists those boards. Drop any whose folder
       // is gone from disk BEFORE the writes below — otherwise writeBoardIndexFiles
       // re-creates their folders + indexes in the vault we just switched into, so
@@ -296,6 +414,260 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     await this.writeBoardIndexFiles();
     await this.syncGraphColorGroups();
     await this.saveData(this.data);
+  }
+
+  // Nextcloud helpers -------------------------------------------------------
+  //
+  // Credentials round-trip through data.json in encrypted form. The App
+  // Password is only ever held in this.nextcloudAppPassword (in memory) while
+  // the plugin is loaded; the DeckClient is lazy so unauthenticated users
+  // never pay the setup cost.
+
+  isNextcloudEnabled() {
+    const nc = this.data && this.data.nextcloud;
+    return !!(nc && nc.enabled && nc.serverUrl && nc.username && nc.appPasswordCipher);
+  }
+
+  /**
+   * Decrypt and cache the App Password. Returns "" when no credentials are
+   * saved. Throws when the ciphertext is corrupt / undecryptable — the
+   * settings tab uses that to surface a "please sign in again" state.
+   */
+  async loadNextcloudAppPassword() {
+    if (this.nextcloudAppPassword) return this.nextcloudAppPassword;
+    const nc = this.data && this.data.nextcloud;
+    if (!nc || !nc.appPasswordCipher) return "";
+    const plaintext = await decryptAppPassword(nc.appPasswordCipher);
+    this.nextcloudAppPassword = plaintext;
+    return plaintext;
+  }
+
+  /**
+   * Persist a fresh { serverUrl, username, appPassword } tuple. `enabled` is
+   * set to true because "we just successfully signed in" is the only path
+   * here — flip it off through signOutNextcloud() instead.
+   */
+  async saveNextcloudCredentials({ serverUrl, username, appPassword }) {
+    if (!serverUrl || !username || !appPassword) {
+      throw new Error("Missing server URL, username, or App Password.");
+    }
+    const cipher = await encryptAppPassword(appPassword);
+    this.data.nextcloud = Object.assign({}, this.data.nextcloud || {}, {
+      enabled: true,
+      serverUrl,
+      username,
+      appPasswordCipher: cipher,
+    });
+    this.nextcloudAppPassword = appPassword;
+    this.deckClient = null;
+    await this.saveData(this.data);
+    // Now that we're connected, expose the ribbon icon and start the
+    // auto-sync timer if the user has it enabled.
+    this.updateNextcloudRibbon();
+    this.reconfigureAutoSync();
+  }
+
+  /**
+   * Local + remote sign-out. Remote revocation is best-effort: even if
+   * Nextcloud is unreachable we still clear local state so the user can
+   * always get out of a bad login.
+   */
+  async signOutNextcloud() {
+    const nc = this.data && this.data.nextcloud;
+    if (nc && nc.serverUrl && nc.username && this.nextcloudAppPassword) {
+      await revokeAppPassword(nc.serverUrl, nc.username, this.nextcloudAppPassword).catch(() => false);
+    }
+    this.data.nextcloud = Object.assign({}, this.data.nextcloud || {}, {
+      enabled: false,
+      serverUrl: "",
+      username: "",
+      appPasswordCipher: "",
+      boardBindings: {},
+      lastSyncAt: 0,
+    });
+    this.nextcloudAppPassword = "";
+    this.deckClient = null;
+    await this.saveData(this.data);
+    // Reflect the new "disconnected" state in the ribbon and stop the
+    // periodic auto-sync so we don't keep hammering a defunct client.
+    this.updateNextcloudRibbon();
+    this.reconfigureAutoSync();
+  }
+
+  /**
+   * Lazy DeckClient. Returns null when the user isn't signed in yet, or when
+   * the stored ciphertext can't be decrypted (which surfaces as a "sign in
+   * again" state in the settings tab).
+   */
+  async getDeckClient() {
+    if (!this.isNextcloudEnabled()) return null;
+    if (this.deckClient) return this.deckClient;
+    let appPassword = "";
+    try {
+      appPassword = await this.loadNextcloudAppPassword();
+    } catch (error) {
+      console.error("Task Deck: could not decrypt saved App Password", error);
+      return null;
+    }
+    if (!appPassword) return null;
+    const nc = this.data.nextcloud;
+    this.deckClient = new DeckClient({
+      serverUrl: nc.serverUrl,
+      username: nc.username,
+      appPassword,
+      logger: (event) => this.pushSyncLog(event),
+    });
+    return this.deckClient;
+  }
+
+  pushSyncLog(event) {
+    if (!this.syncLog) this.syncLog = [];
+    this.syncLog.push(Object.assign({ at: Date.now() }, event));
+    // Cap the buffer so a chatty sync never balloons memory.
+    if (this.syncLog.length > 200) this.syncLog.splice(0, this.syncLog.length - 200);
+  }
+
+  /**
+   * Emit a verbose diagnostic entry. Only records when settings.debugLogging
+   * is on; kept quiet by default so production sessions stay noise-free.
+   * Also mirrors to console.debug so users can grep the devtools console.
+   *
+   * `payload` may contain arbitrary keys; nothing sensitive should be logged
+   * (no App Password, no full card body). Keep it to identifiers, counts,
+   * status codes, and short error strings.
+   */
+  debugLog(payload) {
+    if (!this.data || !this.data.debugLogging) return;
+    const entry = Object.assign({ event: "debug" }, payload || {});
+    this.pushSyncLog(entry);
+    try {
+      // eslint-disable-next-line no-console
+      console.debug("[Nextcloud Deck debug]", entry);
+    } catch (_err) { /* console might be missing on mobile */ }
+  }
+
+  /**
+   * Flag a card as having local edits that still need to be pushed. Cards that
+   * were never linked to a remote board (no boardBinding) are still marked —
+   * the sync manager will decide whether the board is tracked before acting.
+   */
+  markCardDirty(card) {
+    if (!card) return;
+    card.localDirty = true;
+    card.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * Record a card deletion so the next push can tear it down on Nextcloud. No-op
+   * when the card was never synced (`remoteId` is null): local-only cards need
+   * no remote cleanup.
+   */
+  enqueueCardDeletion(card) {
+    if (!card || card.remoteId == null) return;
+    const board = this.data.boards.find((b) => b.id === card.boardId);
+    if (!board || board.remoteId == null) return;
+    const list = board.lists.find((l) => l.id === card.listId);
+    if (!list || list.remoteId == null) return;
+    const nc = this.data.nextcloud;
+    if (!Array.isArray(nc.pendingDeletions)) nc.pendingDeletions = [];
+    // Dedupe so a rapid create/delete cycle doesn't stack duplicates.
+    if (nc.pendingDeletions.some((entry) => entry.remoteId === card.remoteId)) return;
+    nc.pendingDeletions.push({
+      remoteId: card.remoteId,
+      boardRemoteId: board.remoteId,
+      stackRemoteId: list.remoteId,
+      at: Date.now(),
+    });
+    // Any attachments tied to this card also need to be reaped.
+    (card.attachments || []).forEach((attachment) => this.enqueueAttachmentDeletion(card, attachment));
+  }
+
+  /**
+   * Record an attachment deletion. Called both from card deletion and from
+   * the vault event handler when the user removes a file directly.
+   */
+  enqueueAttachmentDeletion(card, attachment) {
+    if (!card || !attachment || attachment.remoteId == null) return;
+    const board = this.data.boards.find((b) => b.id === card.boardId);
+    if (!board || board.remoteId == null) return;
+    const list = board.lists.find((l) => l.id === card.listId);
+    if (!list || list.remoteId == null) return;
+    if (card.remoteId == null) return;
+    const nc = this.data.nextcloud;
+    if (!Array.isArray(nc.pendingAttachmentDeletions)) nc.pendingAttachmentDeletions = [];
+    if (nc.pendingAttachmentDeletions.some((entry) => entry.attachmentRemoteId === attachment.remoteId)) return;
+    nc.pendingAttachmentDeletions.push({
+      attachmentRemoteId: attachment.remoteId,
+      cardRemoteId: card.remoteId,
+      stackRemoteId: list.remoteId,
+      boardRemoteId: board.remoteId,
+      at: Date.now(),
+    });
+  }
+
+  /**
+   * Vault delete handler: identifies whether the removed file matches a
+   * tracked attachment and, if so, enqueues the remote deletion and drops the
+   * entry from the card.
+   */
+  handleAttachmentDelete(file) {
+    if (!file || !file.path) return;
+    for (const card of Object.values(this.data.cards || {})) {
+      if (!Array.isArray(card.attachments)) continue;
+      const idx = card.attachments.findIndex((entry) => entry && entry.filePath === file.path);
+      if (idx < 0) continue;
+      const [removed] = card.attachments.splice(idx, 1);
+      this.enqueueAttachmentDeletion(card, removed);
+      this.saveData(this.data).catch(() => {});
+      return;
+    }
+  }
+
+  handleAttachmentRename(file, oldPath) {
+    if (!file || !file.path || !oldPath) return;
+    for (const card of Object.values(this.data.cards || {})) {
+      if (!Array.isArray(card.attachments)) continue;
+      const entry = card.attachments.find((att) => att && att.filePath === oldPath);
+      if (!entry) continue;
+      entry.filePath = file.path;
+      this.saveData(this.data).catch(() => {});
+      return;
+    }
+  }
+
+  /**
+   * Lazy SyncManager. Created on first access so plain local use never spins
+   * up the machinery. Reset by signOutNextcloud() alongside `deckClient`.
+   */
+  getSyncManager() {
+    if (!this.syncManager) this.syncManager = new SyncManager(this);
+    return this.syncManager;
+  }
+
+  /** Run a pull from Nextcloud Deck. Safe to call when disconnected — the
+   *  manager will surface a status message instead of throwing. */
+  async runNextcloudSync({ manual = false } = {}) {
+    if (!this.isNextcloudEnabled()) return { state: "idle", at: Date.now(), message: "Not connected." };
+    // Serialize sync runs so an auto-sync tick can't stampede on top of a
+    // still-running manual sync. Returning the in-flight promise means
+    // concurrent callers see the same result instead of a spurious retry.
+    if (this.nextcloudSyncInFlight) return this.nextcloudSyncInFlight;
+    const run = (async () => {
+      try {
+        await this.syncCardsFromFolder();
+      } catch (error) {
+        // Non-fatal: proceed with the network sync even if folder scan blows up.
+        this.pushSyncLog({ event: "folder-scan-failed", message: (error && error.message) || String(error) });
+      }
+      const manager = this.getSyncManager();
+      return manager.runPull({ manual });
+    })();
+    this.nextcloudSyncInFlight = run;
+    try {
+      return await run;
+    } finally {
+      this.nextcloudSyncInFlight = null;
+    }
   }
 
   getBoard() {
@@ -542,27 +914,6 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     });
   }
 
-  getSyncDeckPlugin() {
-    const plugins = this.app.plugins && this.app.plugins.plugins;
-    return (plugins && plugins["sync-deck"]) || null;
-  }
-
-  // Open the Sync Deck panel (cloud sync for boards + vaults). If Sync Deck isn't
-  // installed, point the user at it.
-  async openSyncDeck() {
-    const syncDeck = this.getSyncDeckPlugin();
-    if (!syncDeck || typeof syncDeck.activateView !== "function") {
-      new Notice("Install the Sync Deck plugin to sync your boards and vaults across devices.");
-      window.open("https://github.com/ismailivanov/SyncDeck");
-      return;
-    }
-    try {
-      await syncDeck.activateView();
-    } catch (error) {
-      new Notice("Could not open Sync Deck.");
-    }
-  }
-
   // Task Deck is installed manually (not from the community store), so it can't
   // get store update prompts. Check the GitHub releases once per session; if a
   // newer version is out, the board view shows an "Update" banner. Fails silent
@@ -602,62 +953,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return false;
   }
 
-  // Free Sync Deck accounts can only sync a limited number of boards. The gate
-  // applies ONLY when Sync Deck is installed AND signed in AND on the free plan,
-  // so a standalone Task Deck (no cloud account) stays unlimited. Pro or an
-  // unset/null limit => unlimited. Existing boards are never removed; only NEW
-  // board creation past the limit is blocked.
-  boardGate() {
-    const syncDeck = this.getSyncDeckPlugin();
-    const sd = syncDeck && syncDeck.data;
-    // The board limit only applies to SYNCED boards: it bites only when the user
-    // is signed in AND actively syncing on the free plan. Not syncing (sync off
-    // or no Sync Deck account) => unlimited local boards.
-    if (!sd || !sd.signedIn || !sd.syncEnabled) return { limited: false, limit: null };
-    const limit = sd.boardLimit;
-    if (sd.plan === "pro" || limit === null || limit === undefined || !Number.isFinite(Number(limit))) {
-      return { limited: false, limit: null };
-    }
-    return { limited: true, limit: Number(limit) };
-  }
-
-  // True (and warns) when the free board limit is already reached.
-  boardLimitReached(notify) {
-    const gate = this.boardGate();
-    if (!gate.limited || this.data.boards.length < gate.limit) return false;
-    if (notify) {
-      new Notice(`While syncing, the free plan covers ${gate.limit} board${gate.limit === 1 ? "" : "s"}. Upgrade Sync Deck to Pro to sync more.`);
-    }
-    return true;
-  }
-
-  getSyncDeckBridge() {
-    const syncDeck = this.getSyncDeckPlugin();
-    const data = syncDeck && syncDeck.data;
-    if (!syncDeck || typeof syncDeck.api !== "function") return null;
-    if (!data || !data.signedIn || !data.authToken || !data.vaultId) return null;
-    return syncDeck;
-  }
-
-  // Assignable users = the SyncDeck vault members. Empty when SyncDeck is not
-  // installed/signed in (the assignee UI then just shows nothing to assign).
-  getVaultMembers() {
-    const syncDeck = this.getSyncDeckPlugin();
-    const members = syncDeck && syncDeck.data && syncDeck.data.members;
-    if (!Array.isArray(members)) return [];
-    return members
-      .filter((m) => m && m.email)
-      .map((m) => ({ email: m.email, name: m.name || m.email, color: m.color || "#8b5cf6", picture: m.picture || "" }));
-  }
-
-  // The avatar picture for an assignee, resolved live from SyncDeck (not stored
-  // in the card frontmatter, since the URL can change/expire).
-  getMemberPicture(email) {
-    const member = this.getVaultMembers().find((m) => m.email === email);
-    return (member && member.picture) || "";
-  }
-
   normalizeAssignees(assignees) {
+    // Assignee UI is disabled in MVP (single-user Nextcloud sync). We keep the
+    // data structure intact so existing card frontmatter round-trips cleanly and
+    // future team-mode can re-surface assignees without a migration.
     const seen = new Set();
     return (Array.isArray(assignees) ? assignees : [])
       .filter((a) => a && a.email)
@@ -689,92 +988,6 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     return { src: this.app.vault.getResourcePath(file), name: file.name, file };
   }
 
-  // Presence responses carry both the cursor roster (users) and the card-lock
-  // roster (locks). Both helpers return { users, locks } on success, an empty
-  // object-shaped roster when the bridge is unavailable (a real "nobody here"),
-  // or null on a transient error so callers keep their last known state.
-  async sendBoardPresence(board, point) {
-    const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !board || !point) return { users: [], locks: [] };
-
-    try {
-      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence`, {
-        method: "POST",
-        body: {
-          boardId: board.id,
-          boardName: board.name,
-          x: point.x,
-          y: point.y,
-          color: syncDeck.data.user.color || "#8b5cf6",
-        },
-      });
-      return { users: result.users || [], locks: result.locks || [] };
-    } catch (error) {
-      return null;
-    }
-  }
-
-  async fetchBoardPresence(boardId) {
-    const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !boardId) return { users: [], locks: [] };
-
-    try {
-      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardId)}`);
-      return { users: result.users || [], locks: result.locks || [] };
-    } catch (error) {
-      return null;
-    }
-  }
-
-  // Card edit locks ---------------------------------------------------------
-
-  async postCardLock(boardId, cardId, action) {
-    const syncDeck = this.getSyncDeckBridge();
-    if (!syncDeck || !boardId || !cardId) return null;
-    try {
-      return await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/lock`, {
-        method: "POST",
-        body: {
-          boardId,
-          cardId,
-          action,
-          color: syncDeck.data.user.color || "#8b5cf6",
-        },
-      });
-    } catch (error) {
-      return null;
-    }
-  }
-
-  // Try to take the lock for a card. Returns { ok, lock } — ok:false means
-  // someone else holds it (lock describes the holder). null means offline: we
-  // fail open so a server hiccup never blocks local editing.
-  async acquireCardLock(boardId, cardId) {
-    const result = await this.postCardLock(boardId, cardId, "acquire");
-    if (!result) return { ok: true, offline: true };
-    if (Array.isArray(result.locks)) this.setCardLocks(result.locks);
-    return result;
-  }
-
-  async releaseCardLock(boardId, cardId) {
-    const result = await this.postCardLock(boardId, cardId, "release");
-    if (result && Array.isArray(result.locks)) this.setCardLocks(result.locks);
-    return result;
-  }
-
-  setCardLocks(locks) {
-    const next = new Map();
-    (locks || []).forEach((lock) => {
-      if (lock && lock.cardId) next.set(lock.cardId, lock);
-    });
-    this.cardLocks = next;
-  }
-
-  // The holder if this card is being edited by someone else, otherwise null.
-  getCardLockHolder(cardId) {
-    return (this.cardLocks && this.cardLocks.get(cardId)) || null;
-  }
-
   updateExplorerColors() {
     if (!this.explorerColorStyleEl) {
       this.explorerColorStyleEl = document.createElement("style");
@@ -802,6 +1015,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   async toggleCompactLabels() {
     this.data.compactLabels = !this.data.compactLabels;
+    await this.savePluginData();
+    this.refreshViews();
+  }
+
+  async toggleShowChecklistOnCards() {
+    this.data.showChecklistOnCards = !this.data.showChecklistOnCards;
     await this.savePluginData();
     this.refreshViews();
   }
@@ -968,8 +1187,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   // This is the symmetric counterpart to restoreBoardsFromIndexFiles (adopt on an
   // index appearing): without it, a board deleted on one device is re-created here
   // from our own data.json and its index re-uploaded, resurrecting it for everyone
-  // (Sync Deck delivers the deletion as an index-file delete, not a folder delete
-  // — the emptied folder may not even be removed yet).
+  // (a remote sync can deliver the deletion as an index-file delete, not a
+  // folder delete — the emptied folder may not even be removed yet).
   //
   // Keyed ONLY on the CURRENT boardIndexPath — deliberately NOT the legacy path.
   // A board's live index is always the current path (writeBoardIndexFile writes it
@@ -1208,15 +1427,12 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
   }
 
   createBoardPrompt() {
-    if (this.boardLimitReached(true)) return;
     this.promptText("Create board", "Board name", "", async (name) => {
       await this.createBoard(name);
     });
   }
 
   async createBoard(name) {
-    // Safety net: never exceed the free board limit even via a non-prompt caller.
-    if (this.boardLimitReached(true)) return null;
     const board = {
       id: uid("board"),
       name,
@@ -1275,6 +1491,83 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     board.name = name;
     await this.savePluginData();
     this.refreshViews();
+  }
+
+  /**
+   * Move every board folder under the current Nextcloud rootFolder setting.
+   * Boards already at the desired location are skipped. Card file paths and
+   * attachment paths are rewritten in-place so links and Deck-side references
+   * remain consistent. Returns the count of boards actually moved.
+   */
+  async migrateBoardRoots() {
+    const nc = this.data.nextcloud || {};
+    const rawRoot = typeof nc.rootFolder === "string" ? nc.rootFolder : "Deck";
+    const root = rawRoot.trim().replace(/^\/+|\/+$/g, "");
+
+    let moved = 0;
+    for (const board of this.data.boards) {
+      const currentFolder = board.folderPath || "";
+      const currentParent = currentFolder.includes("/") ? currentFolder.slice(0, currentFolder.lastIndexOf("/")) : "";
+      const boardBaseName = currentFolder.split("/").pop();
+      if (!boardBaseName) continue;
+      if (currentParent === root) continue; // already in the right place
+
+      // Ensure the root folder exists.
+      if (root && !this.app.vault.getAbstractFileByPath(root)) {
+        await this.app.vault.createFolder(root).catch(() => {});
+      }
+
+      // Compute the destination path, avoiding collisions with a same-named
+      // sibling that already lives under the new root.
+      const desiredBase = root ? `${root}/${boardBaseName}` : boardBaseName;
+      let desired = desiredBase;
+      let dedupe = 2;
+      while (desired !== currentFolder && this.app.vault.getAbstractFileByPath(desired)) {
+        desired = `${desiredBase} ${dedupe}`;
+        dedupe += 1;
+      }
+      if (desired === currentFolder) continue;
+
+      const folder = this.app.vault.getAbstractFileByPath(currentFolder);
+      if (folder) {
+        try {
+          await this.app.vault.rename(folder, desired);
+        } catch (error) {
+          this.pushSyncLog({
+            event: "migrate-board-root.failed",
+            boardId: board.id,
+            from: currentFolder,
+            to: desired,
+            message: (error && error.message) || String(error),
+          });
+          continue;
+        }
+      }
+
+      // Rewrite every card / attachment path that pointed into the old folder.
+      Object.values(this.data.cards).forEach((card) => {
+        if (card.boardId !== board.id) return;
+        if (card.filePath && card.filePath.startsWith(`${currentFolder}/`)) {
+          card.filePath = `${desired}/${card.filePath.slice(currentFolder.length + 1)}`;
+        }
+        if (Array.isArray(card.attachments)) {
+          card.attachments.forEach((att) => {
+            if (att && att.filePath && att.filePath.startsWith(`${currentFolder}/`)) {
+              att.filePath = `${desired}/${att.filePath.slice(currentFolder.length + 1)}`;
+            }
+          });
+        }
+      });
+      board.folderPath = desired;
+      moved += 1;
+      this.pushSyncLog({ event: "migrate-board-root.done", boardId: board.id, to: desired });
+    }
+
+    if (moved) {
+      await this.savePluginData();
+      this.refreshViews();
+    }
+    return moved;
   }
 
   addList() {
@@ -1397,6 +1690,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     this.data.cards[card.id] = card;
     list.cardIds.unshift(card.id);
+    this.markCardDirty(card);
     if (!this.applyingUndo) {
       const newId = card.id;
       this.recordUndo(async () => { await this.deleteCard(newId); });
@@ -1434,6 +1728,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       await this.renameCardFile(card, patch.title);
     }
     Object.assign(card, patch, { updatedAt: new Date().toISOString() });
+    this.markCardDirty(card);
     await this.writeCardFile(card);
     await this.savePluginData();
     this.refreshViews();
@@ -1474,6 +1769,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     card.boardId = targetBoard.id;
     card.listId = targetListId;
+    this.markCardDirty(card);
     // Persist the new order: rewrite every card in the affected list(s) so their
     // `position` frontmatter reflects the new order and syncs to other devices.
     await this.writeListCardFiles(targetList);
@@ -1524,6 +1820,14 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     await this.updateCard(cardId, { completed });
   }
 
+  async toggleChecklistItem(cardId, index) {
+    const card = this.data.cards[cardId];
+    if (!card || !Array.isArray(card.checklist) || !card.checklist[index]) return;
+    const checklist = clone(card.checklist);
+    checklist[index].done = !checklist[index].done;
+    await this.updateCard(cardId, { checklist });
+  }
+
   playCompletionSound() {
     try {
       const audio = new Audio(COMPLETION_SOUND_URL);
@@ -1557,6 +1861,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
       }
       if (listId) this.recordUndo(async () => { await this.restoreDeletedCard(cardCopy, listId, beforeId, fileContent); });
     }
+
+    this.enqueueCardDeletion(card);
 
     this.data.boards.forEach((board) => board.lists.forEach((list) => {
       list.cardIds = list.cardIds.filter((id) => id !== cardId);
@@ -1650,8 +1956,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   /**
    * Two card files sharing one kanban-card-id are the SAME card — e.g. a move
-   * that Sync Deck (a generic file syncer with no rename concept) split into a
-   * create+delete across devices, leaving a duplicate. Keep one canonical file
+   * that a naive file syncer (no rename concept) split into a create+delete
+   * across devices, leaving a duplicate. Keep one canonical file
    * and send the rest to the recoverable trash. The winner is chosen
    * deterministically (device-independent) so peers converge instead of fight.
    */
@@ -1880,7 +2186,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
   // Adopt a KNOWN board's list structure (ids/titles/colours/order + deleted-list
   // tombstones) from an index file that changed on disk under us — used when a
-  // newer index arrived (e.g. Sync Deck pulled it) so we DON'T revert it. Cards
+  // newer index arrived (e.g. a Nextcloud pull wrote it) so we DON'T revert it. Cards
   // re-attach to their lists by frontmatter on the next folder sync.
   importListStructureFromIndex(board, markdown) {
     const listMeta = decodeListMeta(markdown);
@@ -1959,7 +2265,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
 
     // Optimistic concurrency (mirrors writeCardFile): NEVER overwrite an index
     // that changed on disk under us — that stale rewrite is exactly what reverted
-    // everyone's board on open (a Sync Deck pull delivers a newer index, and our
+    // everyone's board on open (a Nextcloud pull delivers a newer index, and our
     // startup regenerate-from-stale-data.json used to clobber it and re-upload the
     // revert). Instead adopt the newer structure and re-import; only write when
     // the on-disk index is the one WE last touched.
@@ -1997,8 +2303,8 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     // data.json is almost always a board just delivered by sync that we haven't
     // imported yet — NOT junk. We used to trash it here, which was catastrophic:
     // it destroyed the only cross-device carrier of the board's definition, and
-    // because Sync Deck propagates local deletes, that delete flowed back to the
-    // server and every other device — leaving the board's cards behind as an
+    // because a remote sync propagates local deletes, that delete flowed back to
+    // the server and every other device — leaving the board's cards behind as an
     // invisible, board-less folder everywhere. (restoreBoardsFromIndexFiles only
     // runs in the one-time reconcile, so an index that syncs in later, or a
     // savePluginData that races ahead of the reconcile, hit this cleanup first.)
@@ -2125,6 +2431,30 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (board) card.boardId = board.id;
     await this.ensureBoardFolder(board);
     const list = this.findList(card.listId, board);
+    // Guard against a missing / directory-shaped filePath. This can happen
+    // when a card entered `data.cards` from a Nextcloud pull without ever
+    // having a note materialized (remoteCardToLocal returns filePath="").
+    // Without this guard, adapter.write("") targets the vault root and
+    // Node throws EISDIR. We surface an event so debug logs make the
+    // recovery visible instead of silently deciding a path.
+    if (!card.filePath || !/\.md$/i.test(card.filePath)) {
+      if (!board) {
+        // We really cannot invent a location without at least a board — bail
+        // loudly rather than write into the vault root.
+        const err = new Error("Card has no board folder assigned. Reload after the next Nextcloud sync.");
+        this.pushSyncLog({ event: "writeCardFile.no-board", cardId: card.id, filePath: card.filePath });
+        throw err;
+      }
+      const generated = await this.nextCardPath(card.title || "Untitled card", null, board);
+      this.pushSyncLog({
+        event: "writeCardFile.assign-path",
+        cardId: card.id,
+        oldPath: card.filePath,
+        newPath: generated,
+        boardFolder: board.folderPath,
+      });
+      card.filePath = generated;
+    }
     const tags = await this.cardTags(card, this.taskDeckTag(board, list));
     // Position within the list, from the live cardIds order. This is the ONLY
     // place card order is persisted to a synced file (data.json order does not
@@ -2159,8 +2489,41 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     ].join("\n");
 
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
+    this.debugLog({
+      event: "writeCardFile",
+      cardId: card.id,
+      filePath: card.filePath,
+      hasCachedFile: !!file,
+      cachedIsMd: !!(file && file.extension === "md"),
+      title: card.title,
+      checklistLen: (card.checklist || []).length,
+    });
     if (!file || file.extension !== "md") {
-      await this.app.vault.create(card.filePath, markdown);
+      // The vault index may be stale (files re-created outside Obsidian, case-
+      // folded paths on macOS, or a race with a Nextcloud sync write). Ask the
+      // adapter directly before we create, so we overwrite instead of
+      // colliding with a file Obsidian just hasn't indexed yet.
+      try {
+        const exists = await this.app.vault.adapter.exists(card.filePath);
+        this.debugLog({ event: "writeCardFile.adapter-exists", cardId: card.id, exists });
+        if (exists) {
+          await this.app.vault.adapter.write(card.filePath, markdown);
+        } else {
+          await this.app.vault.create(card.filePath, markdown);
+        }
+      } catch (error) {
+        // Second-chance handler: if the error is "File already exists" we
+        // overwrite through the adapter. Any other error propagates so the
+        // caller sees it.
+        const message = (error && error.message) || String(error);
+        if (/already exists/i.test(message)) {
+          this.debugLog({ event: "writeCardFile.recover-existing", cardId: card.id, filePath: card.filePath, message });
+          await this.app.vault.adapter.write(card.filePath, markdown);
+        } else {
+          this.debugLog({ event: "writeCardFile.failed", cardId: card.id, filePath: card.filePath, message });
+          throw error;
+        }
+      }
       this.diskSignatures.set(card.id, markdown);
       return;
     }

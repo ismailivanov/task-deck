@@ -10,23 +10,12 @@ const {
   checklistStats,
   createElement,
   dateRangeLabel,
-  initials,
   hasDragType,
   iconButton,
   textButton,
   textLine,
 } = require("./helpers");
 const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal } = require("./modals");
-
-// Live board presence (SyncDeck cursors) tuning.
-// The transport stays plain HTTP polling; smoothness comes from client-side
-// interpolation rather than a faster/heavier network loop.
-const PRESENCE_SEND_INTERVAL_MS = 110; // min gap between outbound position posts while moving
-const PRESENCE_POLL_ACTIVE_MS = 260; // GET poll while other cursors are on the board
-const PRESENCE_POLL_IDLE_MS = 1100; // GET poll when nobody else is present
-const PRESENCE_HEARTBEAT_MS = 3000; // resend our own point so the server TTL never expires us
-const PRESENCE_SMOOTHING_TAU_MS = 70; // interpolation time constant; lower = snappier, higher = smoother
-const PRESENCE_SNAP_DISTANCE = 0.0006; // normalized distance under which we snap instead of easing
 
 // Drag payload type for reordering table columns (kept distinct from card/list drags).
 const TABLE_COL_DRAG_TYPE = "application/x-task-deck-column";
@@ -63,13 +52,16 @@ class BoardView extends ItemView {
   }
 
   async onClose() {
-    this.stopPresence();
     this.closeTablePopover();
   }
 
   render() {
     const board = this.plugin.getBoard();
-    this.stopPresence();
+    // render() runs a full teardown/rebuild on every card or list mutation, which
+    // would otherwise reset the board's horizontal scroll and every list's
+    // vertical scroll back to zero (e.g. checking off a card near the bottom of
+    // a long list). Snapshot positions now, restore them once the new DOM is in.
+    const scrollState = this.captureScrollState();
     this.contentEl.replaceChildren();
     this.contentEl.addClass("ot-board-root");
     this.contentEl.classList.toggle("is-compact-labels", !!this.plugin.data.compactLabels);
@@ -97,10 +89,6 @@ class BoardView extends ItemView {
     toolbar.append(title);
     const actions = createElement("div", "ot-toolbar-actions");
     actions.append(textButton("plus-square", "New board", () => this.plugin.createBoardPrompt()));
-    // Cross-sell only for users who don't have Sync Deck yet; hide once installed.
-    if (!this.plugin.getSyncDeckPlugin()) {
-      actions.append(textButton("cloud", "Sync Boards", () => this.plugin.openSyncDeck(), "ot-cloud-cta"));
-    }
     actions.append(
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
@@ -110,8 +98,7 @@ class BoardView extends ItemView {
 
     // Table view is a second lens over the SAME card data (each Kanban list is a
     // Status value). No card data changes, so nothing new syncs — the chosen view
-    // is a per-device UI preference kept in data.json. Presence cursors are a
-    // board-layout concept, so they only run in board mode.
+    // is a per-device UI preference kept in data.json.
     if (mode === "table") {
       this.contentEl.append(toolbar, this.renderTable(board));
       return;
@@ -121,7 +108,40 @@ class BoardView extends ItemView {
     board.lists.forEach((list) => scroller.append(this.renderList(list)));
 
     this.contentEl.append(toolbar, scroller);
-    this.startPresence(board);
+    this.restoreScrollState(scrollState);
+    // Cards mount with transitions suppressed (see renderCard) so a full rebuild
+    // doesn't replay the hover-in animation under a cursor that never moved.
+    // Re-enable next frame so real hover/drag interactions still animate.
+    requestAnimationFrame(() => {
+      this.contentEl.querySelectorAll(".ot-card-no-transition").forEach((el) => el.classList.remove("ot-card-no-transition"));
+    });
+  }
+
+  /** Reads current scroll offsets before render() tears the DOM down. */
+  captureScrollState() {
+    const boardScroll = this.contentEl.querySelector(":scope > .ot-board-scroll");
+    const listScrollTop = {};
+    this.contentEl.querySelectorAll(".ot-list").forEach((column) => {
+      const cards = column.querySelector(".ot-cards");
+      if (cards && column.dataset.listId) listScrollTop[column.dataset.listId] = cards.scrollTop;
+    });
+    return {
+      boardScrollLeft: boardScroll ? boardScroll.scrollLeft : 0,
+      listScrollTop,
+    };
+  }
+
+  /** Re-applies scroll offsets captured by captureScrollState() to the fresh DOM. */
+  restoreScrollState(state) {
+    if (!state) return;
+    const boardScroll = this.contentEl.querySelector(":scope > .ot-board-scroll");
+    if (boardScroll) boardScroll.scrollLeft = state.boardScrollLeft;
+    this.contentEl.querySelectorAll(".ot-list").forEach((column) => {
+      const top = state.listScrollTop[column.dataset.listId];
+      if (top == null) return;
+      const cards = column.querySelector(".ot-cards");
+      if (cards) cards.scrollTop = top;
+    });
   }
 
   // "Update available" banner shown at the top when a newer GitHub release exists
@@ -181,14 +201,13 @@ class BoardView extends ItemView {
   tableColumnDefs() {
     return [
       { key: "status", label: "Status" },
-      { key: "assignee", label: "Assignee" },
       { key: "dates", label: "Dates" },
       { key: "labels", label: "Labels" },
     ];
   }
 
   defaultColWidth(key) {
-    return { status: 150, assignee: 175, dates: 155, labels: 190 }[key] || 150;
+    return { status: 150, dates: 155, labels: 190 }[key] || 150;
   }
 
   getTableConfig(board) {
@@ -414,8 +433,6 @@ class BoardView extends ItemView {
   }
 
   renderTableRow(card, list, board, visible) {
-    const lockHolder = this.plugin.getCardLockHolder(card.id);
-    const lockedByOther = !!lockHolder;
     const row = createElement("tr", "ot-table-row");
     row.dataset.cardId = card.id;
     if (card.completed) row.classList.add("is-completed");
@@ -424,7 +441,6 @@ class BoardView extends ItemView {
       this.plugin.completedAnimationCardId = null;
       window.setTimeout(() => row.classList.remove("is-just-completed"), 650);
     }
-    if (lockedByOther) row.classList.add("is-locked");
     // Opening a task from the table shows ONLY Description + Checklist — every
     // other field is edited inline from its cell, so no full editor is needed.
     row.addEventListener("click", () => new CardModal(this.app, this.plugin, card.id, { notesOnly: true }).open());
@@ -438,7 +454,6 @@ class BoardView extends ItemView {
     complete.setAttribute("aria-label", card.completed ? "Mark as incomplete" : "Mark as complete");
     complete.addEventListener("click", async (event) => {
       event.stopPropagation();
-      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       await this.plugin.toggleCardCompleted(card.id);
     });
     if (card.completed) complete.append(createElement("span", "ot-card-complete-mark", "✓"));
@@ -450,22 +465,20 @@ class BoardView extends ItemView {
     }
     if (card.details) hints.append(createElement("span", "ot-td-hint", "☰"));
     if (hints.childElementCount) nameInner.append(hints);
-    if (lockedByOther) nameInner.append(this.buildLockBadge(lockHolder));
     nameCell.append(nameInner);
     row.append(nameCell);
 
-    visible.forEach((key) => row.append(this.renderTableCell(key, card, list, board, lockHolder)));
+    visible.forEach((key) => row.append(this.renderTableCell(key, card, list, board)));
     // Trailing empty cell under the "+" add-column header, so every body row has
     // the same cell count as the header (keeps the fixed-layout grid aligned).
     row.append(createElement("td", "ot-td ot-td-addcell"));
     return row;
   }
 
-  renderTableCell(key, card, list, board, lockHolder) {
-    if (key === "status") return this.renderStatusCell(card, list, board, lockHolder);
-    if (key === "assignee") return this.renderAssigneeCell(card, lockHolder);
-    if (key === "dates") return this.renderDatesCell(card, lockHolder);
-    if (key === "labels") return this.renderLabelsCell(card, lockHolder);
+  renderTableCell(key, card, list, board) {
+    if (key === "status") return this.renderStatusCell(card, list, board);
+    if (key === "dates") return this.renderDatesCell(card);
+    if (key === "labels") return this.renderLabelsCell(card);
     return createElement("td", "ot-td");
   }
 
@@ -482,37 +495,20 @@ class BoardView extends ItemView {
     return pill;
   }
 
-  renderStatusCell(card, list, board, lockHolder) {
+  renderStatusCell(card, list, board) {
     const cell = createElement("td", "ot-td ot-td-status");
     const pill = this.buildStatusPill(list);
     pill.classList.add("is-clickable");
     pill.title = "Change status";
     pill.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (lockHolder) return this.notifyCardLocked(lockHolder);
       this.showStatusMenu(event, card, board, list);
     });
     cell.append(pill);
     return cell;
   }
 
-  renderAssigneeCell(card, lockHolder) {
-    const cell = createElement("td", "ot-td ot-td-assignee");
-    const trigger = createElement("div", "ot-cell-edit");
-    trigger.title = "Assign members";
-    const avatars = this.renderCardAssignees(card);
-    if (avatars.childElementCount) trigger.append(avatars);
-    else trigger.append(createElement("span", "ot-td-empty", "＋"));
-    trigger.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (lockHolder) return this.notifyCardLocked(lockHolder);
-      this.showAssigneeMenu(event, card);
-    });
-    cell.append(trigger);
-    return cell;
-  }
-
-  renderDatesCell(card, lockHolder) {
+  renderDatesCell(card) {
     const cell = createElement("td", "ot-td ot-td-dates");
     const dates = dateRangeLabel(card.startDate, card.dueDate);
     const trigger = createElement("div", "ot-cell-edit");
@@ -521,14 +517,13 @@ class BoardView extends ItemView {
     else trigger.append(createElement("span", "ot-td-empty", "＋"));
     trigger.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (lockHolder) return this.notifyCardLocked(lockHolder);
       new CardDatesModal(this.app, this.plugin, card.id).open();
     });
     cell.append(trigger);
     return cell;
   }
 
-  renderLabelsCell(card, lockHolder) {
+  renderLabelsCell(card) {
     const cell = createElement("td", "ot-td ot-td-labels");
     const trigger = createElement("div", "ot-cell-edit ot-cell-labels");
     trigger.title = "Edit labels";
@@ -541,7 +536,6 @@ class BoardView extends ItemView {
     if (!(card.labels || []).length) trigger.append(createElement("span", "ot-td-empty", "＋"));
     trigger.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (lockHolder) return this.notifyCardLocked(lockHolder);
       this.openLabelPicker(card);
     });
     cell.append(trigger);
@@ -611,35 +605,6 @@ class BoardView extends ItemView {
     });
   }
 
-  showAssigneeMenu(event, card) {
-    const members = this.plugin.getVaultMembers();
-    this.openTablePopover(event.currentTarget, (pop) => {
-      if (!members.length) {
-        pop.append(createElement("div", "ot-popover-empty", "No members — sign in to Sync Deck"));
-        return;
-      }
-      const paint = () => {
-        pop.replaceChildren();
-        const current = ((this.plugin.data.cards[card.id] || card).assignees) || [];
-        members.forEach((member) => {
-          const assigned = current.some((a) => a && a.email === member.email);
-          const row = this.popoverRow(this.buildAvatar(member), member.name || member.email, assigned);
-          row.addEventListener("click", async () => {
-            const now = ((this.plugin.data.cards[card.id] || card).assignees) || [];
-            const on = now.some((a) => a && a.email === member.email);
-            const next = on
-              ? now.filter((a) => a && a.email !== member.email)
-              : [...now, { email: member.email, name: member.name, color: member.color }];
-            await this.plugin.updateCard(card.id, { assignees: next });
-            paint(); // keep the picker open and refresh the checks for multi-select
-          });
-          pop.append(row);
-        });
-      };
-      paint();
-    });
-  }
-
   openLabelPicker(card) {
     new LabelPickerModal(this.app, this.plugin.data.labels || [], card.labels || [], async (labels, selectedLabels) => {
       await this.plugin.updateCard(card.id, { labels: selectedLabels }, labels);
@@ -668,330 +633,9 @@ class BoardView extends ItemView {
     return form;
   }
 
-  startPresence(board) {
-    if (!this.plugin.getSyncDeckBridge()) return;
-
-    this.presenceBoard = board;
-    this.presencePoint = { x: 0.5, y: 0.08 };
-    this.presenceUsers = new Map();
-    this.presenceSendInFlight = false;
-    this.presenceDirty = false;
-    this.lastPresenceSendAt = 0;
-    this.presenceRafId = null;
-    this.presenceLastFrame = null;
-    this.presenceTrailTimer = null;
-    // Monotonic session id. render() calls stopPresence()+startPresence() on every
-    // board re-render, so responses from an in-flight request can land after a new
-    // session started. Every async callback carries the gen it was issued under and
-    // no-ops if it no longer matches, so a stale response can never touch live state.
-    this.presenceGen = (this.presenceGen || 0) + 1;
-    const gen = this.presenceGen;
-    // Board-owned copy of the lock roster used purely as the badge-diff baseline.
-    // It must NOT be plugin.cardLocks, which an open card modal rewrites out of
-    // band (acquire/release/heartbeat) and would desync the diff into ghost badges.
-    this.lockUiState = new Map(this.plugin.cardLocks || []);
-    if (!this.presenceTickBound) this.presenceTickBound = (now) => this.presenceTick(now);
-
-    this.presenceLayer = createElement("div", "ot-presence-layer");
-    this.contentEl.append(this.presenceLayer);
-
-    this.presenceMouseHandler = (event) => {
-      const rect = this.presenceLayer.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-      this.presencePoint = { x, y };
-      this.sendPresence();
-    };
-    this.contentEl.addEventListener("pointermove", this.presenceMouseHandler);
-
-    this.presenceHeartbeatTimer = window.setInterval(() => this.sendPresence(true), PRESENCE_HEARTBEAT_MS);
-    this.sendPresence(true);
-    this.pollPresence(gen);
-  }
-
-  stopPresence() {
-    // Invalidate the current session so any request still in flight becomes a no-op
-    // when it resolves, even if no new session starts afterwards (e.g. onClose).
-    this.presenceGen = (this.presenceGen || 0) + 1;
-    if (this.presenceMouseHandler && this.contentEl) {
-      this.contentEl.removeEventListener("pointermove", this.presenceMouseHandler);
-    }
-    if (this.presencePollTimer) window.clearTimeout(this.presencePollTimer);
-    if (this.presenceHeartbeatTimer) window.clearInterval(this.presenceHeartbeatTimer);
-    if (this.presenceTrailTimer) window.clearTimeout(this.presenceTrailTimer);
-    if (this.presenceRafId != null) cancelAnimationFrame(this.presenceRafId);
-    if (this.presenceLayer && this.presenceLayer.parentElement) this.presenceLayer.remove();
-    this.presenceMouseHandler = null;
-    this.presencePollTimer = null;
-    this.presenceHeartbeatTimer = null;
-    this.presenceTrailTimer = null;
-    this.presenceRafId = null;
-    this.presenceLayer = null;
-    this.presenceBoard = null;
-    this.presencePoint = null;
-    this.presenceUsers = null;
-    this.lockUiState = null;
-    this.presenceSendInFlight = false;
-    this.presenceDirty = false;
-  }
-
-  // Post our own cursor position. Sends are coalesced: while a request is in
-  // flight or we are inside the throttle window, we only mark the state dirty
-  // and flush the latest point afterwards so the resting position always lands.
-  sendPresence(force = false) {
-    if (!this.presenceBoard || !this.presencePoint) return;
-    this.presenceDirty = true;
-    this.flushPresence(force);
-  }
-
-  flushPresence(force = false) {
-    if (!this.presenceBoard || !this.presenceDirty || this.presenceSendInFlight) return;
-
-    const now = Date.now();
-    const sinceLast = now - (this.lastPresenceSendAt || 0);
-    if (!force && sinceLast < PRESENCE_SEND_INTERVAL_MS) {
-      if (!this.presenceTrailTimer) {
-        this.presenceTrailTimer = window.setTimeout(() => {
-          this.presenceTrailTimer = null;
-          this.flushPresence();
-        }, PRESENCE_SEND_INTERVAL_MS - sinceLast);
-      }
-      return;
-    }
-
-    if (this.presenceTrailTimer) {
-      window.clearTimeout(this.presenceTrailTimer);
-      this.presenceTrailTimer = null;
-    }
-    const gen = this.presenceGen;
-    this.lastPresenceSendAt = now;
-    this.presenceDirty = false;
-    this.presenceSendInFlight = true;
-    this.plugin.sendBoardPresence(this.presenceBoard, this.presencePoint)
-      .then((result) => this.applyPresenceResult(result, gen))
-      .catch(() => {})
-      .finally(() => {
-        if (gen !== this.presenceGen) return; // superseded session: leave the new one untouched
-        this.presenceSendInFlight = false;
-        if (this.presenceDirty) this.flushPresence();
-      });
-  }
-
-  // Self-scheduling receive loop. It polls fast while other cursors are present
-  // and backs off when alone. GETs are skipped while our own POSTs are already
-  // refreshing the roster, to avoid doubling the request rate while moving.
-  schedulePresencePoll(gen) {
-    if (gen !== this.presenceGen || !this.presenceBoard) return;
-    const hasOthers = this.presenceUsers && this.presenceUsers.size > 0;
-    const delay = hasOthers ? PRESENCE_POLL_ACTIVE_MS : PRESENCE_POLL_IDLE_MS;
-    this.presencePollTimer = window.setTimeout(() => this.pollPresence(gen), delay);
-  }
-
-  pollPresence(gen) {
-    if (gen !== this.presenceGen || !this.presenceBoard) return;
-    const now = Date.now();
-    if (now - (this.lastPresenceSendAt || 0) < PRESENCE_POLL_ACTIVE_MS) {
-      this.schedulePresencePoll(gen);
-      return;
-    }
-    this.plugin.fetchBoardPresence(this.presenceBoard.id)
-      .then((result) => this.applyPresenceResult(result, gen))
-      .catch(() => {})
-      .finally(() => this.schedulePresencePoll(gen));
-  }
-
-  // Split a presence response into its cursor roster and card-lock roster. A
-  // null result means a transient error: keep both rosters as-is (no flicker).
-  applyPresenceResult(result, gen) {
-    if (gen !== this.presenceGen) return;
-    if (!result || !Array.isArray(result.users)) return;
-    this.applyPresenceSnapshot(result.users, gen);
-    this.applyLockSnapshot(Array.isArray(result.locks) ? result.locks : [], gen);
-  }
-
-  // Reconcile the card-lock roster into the plugin's lock map, then patch only
-  // the cards whose lock state changed so the board is not fully re-rendered.
-  applyLockSnapshot(locks, gen) {
-    if (gen !== this.presenceGen) return;
-    // Keep the plugin's map fresh for the card modal, but diff against our own
-    // board-owned baseline so out-of-band modal writes cannot create ghost badges.
-    this.plugin.setCardLocks(locks);
-    const before = this.lockUiState || new Map();
-    const after = new Map();
-    (locks || []).forEach((lock) => {
-      if (lock && lock.cardId) after.set(lock.cardId, lock);
-    });
-
-    const touched = new Set(before.keys());
-    after.forEach((_value, cardId) => touched.add(cardId));
-    touched.forEach((cardId) => {
-      const beforeHolder = before.get(cardId) || null;
-      const afterHolder = after.get(cardId) || null;
-      const beforeEmail = beforeHolder && beforeHolder.email;
-      const afterEmail = afterHolder && afterHolder.email;
-      if (beforeEmail !== afterEmail || (beforeHolder && beforeHolder.name) !== (afterHolder && afterHolder.name)) {
-        this.applyCardLockUi(cardId, afterHolder);
-      }
-    });
-    this.lockUiState = after;
-  }
-
-  // Add/update/remove the lock overlay on a single card element in place.
-  applyCardLockUi(cardId, holder) {
-    if (!this.contentEl) return;
-    const card = this.contentEl.querySelector(`.ot-card[data-card-id="${CSS.escape(cardId)}"]`);
-    if (!card) return;
-    card.classList.toggle("is-locked", !!holder);
-    card.draggable = !holder && this.editingCardId !== cardId;
-    const badge = card.querySelector(".ot-card-lock");
-    if (badge) badge.remove();
-    if (holder) card.append(this.buildLockBadge(holder));
-  }
-
-  // Reconcile the incoming roster against the live cursor elements: update
-  // targets on existing cursors, create ones that just joined, remove ones that
-  // left. Elements are never rebuilt wholesale, so the interpolation survives.
-  applyPresenceSnapshot(users, gen) {
-    if (gen !== this.presenceGen) return; // response from a superseded session
-    if (!this.presenceLayer || !this.presenceUsers) return;
-    // A failed request yields null (see plugin.sendBoardPresence/fetchBoardPresence).
-    // Only an actual array is an authoritative roster; null means "keep what we have"
-    // so a transient network error does not flicker every cursor off and back on.
-    if (!Array.isArray(users)) return;
-    const list = users;
-    const seen = new Set();
-
-    list.forEach((user) => {
-      if (!user || !Number.isFinite(user.x) || !Number.isFinite(user.y)) return;
-      const key = user.email || user.name;
-      if (!key) return;
-      seen.add(key);
-      const x = Math.max(0, Math.min(1, user.x));
-      const y = Math.max(0, Math.min(1, user.y));
-
-      let entry = this.presenceUsers.get(key);
-      if (!entry) {
-        entry = this.createPresenceCursor();
-        entry.cur.x = x;
-        entry.cur.y = y;
-        this.presenceLayer.append(entry.el);
-        this.presenceUsers.set(key, entry);
-      }
-      entry.target.x = x;
-      entry.target.y = y;
-      this.updatePresenceCursorMeta(entry, user);
-    });
-
-    this.presenceUsers.forEach((entry, key) => {
-      if (seen.has(key)) return;
-      if (entry.el.parentElement) entry.el.remove();
-      this.presenceUsers.delete(key);
-    });
-
-    this.ensurePresenceLoop();
-  }
-
-  createPresenceCursor() {
-    const el = createElement("div", "ot-presence-cursor");
-    const arrow = createElement("span", "ot-presence-arrow");
-    const label = createElement("span", "ot-presence-name");
-    const avatar = createElement("img", "ot-presence-avatar");
-    avatar.alt = "";
-    avatar.style.display = "none";
-    const nameText = createElement("span", "", "");
-    label.append(avatar, nameText);
-    el.append(arrow, label);
-    return {
-      el,
-      avatarEl: avatar,
-      nameTextEl: nameText,
-      color: null,
-      name: null,
-      picture: null,
-      cur: { x: 0.5, y: 0.5 },
-      target: { x: 0.5, y: 0.5 },
-    };
-  }
-
-  updatePresenceCursorMeta(entry, user) {
-    const color = user.color || "#8b5cf6";
-    if (color !== entry.color) {
-      entry.color = color;
-      entry.el.style.setProperty("--ot-presence-color", color);
-    }
-    const name = user.name || user.email || "User";
-    if (name !== entry.name) {
-      entry.name = name;
-      entry.nameTextEl.textContent = name;
-    }
-    const picture = user.picture || "";
-    if (picture !== entry.picture) {
-      entry.picture = picture;
-      if (picture) {
-        entry.avatarEl.src = picture;
-        entry.avatarEl.style.display = "";
-      } else {
-        entry.avatarEl.removeAttribute("src");
-        entry.avatarEl.style.display = "none";
-      }
-    }
-  }
-
-  ensurePresenceLoop() {
-    if (this.presenceRafId != null) return;
-    if (!this.presenceUsers || this.presenceUsers.size === 0) return;
-    this.presenceLastFrame = null;
-    this.presenceRafId = requestAnimationFrame(this.presenceTickBound);
-  }
-
-  // Ease every cursor toward its latest network target. Frame-rate independent
-  // exponential smoothing keeps motion identical at 60/120Hz; the dt clamp stops
-  // a big jump after the tab was backgrounded.
-  presenceTick(now) {
-    this.presenceRafId = null;
-    if (!this.presenceLayer || !this.presenceUsers || this.presenceUsers.size === 0) return;
-
-    let dt = now - (this.presenceLastFrame || now);
-    this.presenceLastFrame = now;
-    if (!(dt > 0)) dt = 16;
-    if (dt > 100) dt = 100;
-    const alpha = 1 - Math.exp(-dt / PRESENCE_SMOOTHING_TAU_MS);
-
-    const rect = this.presenceLayer.getBoundingClientRect();
-    const w = rect.width;
-    const h = rect.height;
-    const drawable = w > 0 && h > 0;
-    let anyMoving = false;
-
-    this.presenceUsers.forEach((entry) => {
-      const dx = entry.target.x - entry.cur.x;
-      const dy = entry.target.y - entry.cur.y;
-      if (Math.abs(dx) < PRESENCE_SNAP_DISTANCE && Math.abs(dy) < PRESENCE_SNAP_DISTANCE) {
-        entry.cur.x = entry.target.x;
-        entry.cur.y = entry.target.y;
-      } else {
-        entry.cur.x += dx * alpha;
-        entry.cur.y += dy * alpha;
-        anyMoving = true;
-      }
-      if (drawable) {
-        entry.el.style.transform = `translate(${(entry.cur.x * w).toFixed(1)}px, ${(entry.cur.y * h).toFixed(1)}px)`;
-      }
-    });
-
-    // Idle when everything has settled. A new target restarts the loop via
-    // ensurePresenceLoop(); until then a motionless board costs zero rAF work.
-    // Keep spinning while not yet drawable so cursors still get placed once the
-    // view has a size.
-    if (anyMoving || !drawable) {
-      this.presenceRafId = requestAnimationFrame(this.presenceTickBound);
-    }
-  }
-
   async syncNotes() {
     // Same action as the About modal's "Sync notes": re-import every card from
-    // its Markdown note so changes synced by SyncDeck show up on the boards.
+    // its Markdown note so hand edits (or a Nextcloud pull) show up on the boards.
     try {
       new Notice("Syncing Task Deck notes...");
       await this.plugin.syncCardsFromFolder();
@@ -1011,9 +655,6 @@ class BoardView extends ItemView {
     );
     const welcomeActions = createElement("div", "ot-welcome-actions");
     welcomeActions.append(textButton("plus", "Create board", () => this.plugin.createBoardPrompt()));
-    if (!this.plugin.getSyncDeckPlugin()) {
-      welcomeActions.append(textButton("cloud", "Sync your boards & vaults", () => this.plugin.openSyncDeck(), "ot-cloud-cta"));
-    }
     welcomeActions.append(
       textButton("refresh-cw", "Sync", () => this.syncNotes()),
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
@@ -1209,13 +850,10 @@ class BoardView extends ItemView {
    * and compact metadata badges.
    */
   renderCard(card, list) {
-    const element = createElement("article", "ot-card");
+    const element = createElement("article", "ot-card ot-card-no-transition");
     const isRenaming = this.editingCardId === card.id;
-    const lockHolder = this.plugin.getCardLockHolder(card.id);
-    const lockedByOther = !!lockHolder;
-    element.draggable = !isRenaming && !lockedByOther;
+    element.draggable = !isRenaming;
     element.dataset.cardId = card.id;
-    if (lockedByOther) element.classList.add("is-locked");
     if (card.completed) element.classList.add("is-completed");
     if (card.completed && this.plugin.completedAnimationCardId === card.id) {
       element.classList.add("is-just-completed");
@@ -1257,7 +895,6 @@ class BoardView extends ItemView {
 
     const completeButton = iconButton(card.completed ? "check" : "circle", card.completed ? "Mark as incomplete" : "Mark as complete", async (event) => {
       event.stopPropagation();
-      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       await this.plugin.toggleCardCompleted(card.id);
     });
     completeButton.classList.add("ot-card-complete-toggle");
@@ -1268,7 +905,6 @@ class BoardView extends ItemView {
     const title = isRenaming ? this.renderCardTitleEditor(card) : createElement("div", "ot-card-title", card.title);
     const editButton = iconButton("pencil", "Edit card", (event) => {
       event.stopPropagation();
-      if (lockedByOther) return this.notifyCardLocked(lockHolder);
       this.editingCardId = card.id;
       this.showCardMenu(event, card);
       this.render();
@@ -1283,58 +919,44 @@ class BoardView extends ItemView {
     if (labels.childElementCount) element.append(labels);
     element.append(main);
 
-    const meta = this.renderCardMeta(card);
-    const assignees = this.renderCardAssignees(card);
-    if (meta.childElementCount || assignees.childElementCount) {
-      const footer = createElement("div", "ot-card-footer");
-      footer.append(meta, assignees);
-      element.append(footer);
+    if (this.plugin.data.showChecklistOnCards && (card.checklist || []).length) {
+      element.append(this.renderCardChecklist(card));
     }
 
-    if (lockedByOther) element.append(this.buildLockBadge(lockHolder));
+    const meta = this.renderCardMeta(card);
+    if (meta.childElementCount) {
+      const footer = createElement("div", "ot-card-footer");
+      footer.append(meta);
+      element.append(footer);
+    }
 
     return element;
   }
 
-  renderCardAssignees(card) {
-    const wrap = createElement("div", "ot-card-assignees");
-    const assignees = (card.assignees || []).filter((a) => a && a.email);
-    const max = 3;
-    assignees.slice(0, max).forEach((assignee) => wrap.append(this.buildAvatar(assignee)));
-    if (assignees.length > max) {
-      const more = createElement("span", "ot-card-avatar is-initials", `+${assignees.length - max}`);
-      wrap.append(more);
-    }
+  /**
+   * Trello-style itemized checklist shown on the card front, toggleable
+   * without opening the card. Only rendered when the "Show checklist on
+   * cards" setting is on.
+   */
+  renderCardChecklist(card) {
+    const wrap = createElement("div", "ot-card-checklist-list");
+    (card.checklist || []).forEach((item, index) => {
+      const row = createElement("label", "ot-card-checklist-item");
+      row.draggable = false;
+      row.addEventListener("click", (event) => event.stopPropagation());
+      if (item.done) row.classList.add("is-done");
+      const checkbox = createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = !!item.done;
+      checkbox.addEventListener("change", async (event) => {
+        event.stopPropagation();
+        row.classList.toggle("is-done", checkbox.checked);
+        await this.plugin.toggleChecklistItem(card.id, index);
+      });
+      row.append(checkbox, createElement("span", "ot-card-checklist-item-text", item.text));
+      wrap.append(row);
+    });
     return wrap;
-  }
-
-  buildAvatar(assignee) {
-    const el = createElement("span", "ot-card-avatar");
-    el.style.setProperty("--ot-avatar-color", assignee.color || "#8b5cf6");
-    el.title = assignee.name || assignee.email;
-    const picture = this.plugin.getMemberPicture(assignee.email);
-    if (picture) {
-      const img = createElement("img", "");
-      img.src = picture;
-      img.alt = "";
-      el.append(img);
-    } else {
-      el.textContent = initials(assignee.name || assignee.email);
-      el.classList.add("is-initials");
-    }
-    return el;
-  }
-
-  buildLockBadge(holder) {
-    const badge = createElement("span", "ot-card-lock");
-    badge.style.setProperty("--ot-lock-color", (holder && holder.color) || "#f59e0b");
-    badge.append(createElement("span", "", `🔒 ${(holder && holder.name) || "Someone"}`));
-    badge.title = `${(holder && holder.name) || "Someone"} is editing this card`;
-    return badge;
-  }
-
-  notifyCardLocked(holder) {
-    new Notice(`🔒 ${(holder && holder.name) || "Someone"} is editing this card`);
   }
 
   /**
@@ -1401,7 +1023,7 @@ class BoardView extends ItemView {
       meta.append(badge);
     }
 
-    if ((card.checklist || []).length) {
+    if ((card.checklist || []).length && !this.plugin.data.showChecklistOnCards) {
       const stats = checklistStats(card.checklist);
       const badge = createElement("span", "ot-card-meta-item ot-card-checklist-badge");
       const icon = createElement("span", "ot-card-checklist-icon");

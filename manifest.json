@@ -1,9 +1,9 @@
 {
   "id": "task-deck",
   "name": "Task Deck",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "minAppVersion": "1.5.0",
-  "description": "Trello-style task boards with Markdown-backed cards, labels, dates, and checklists.",
+  "description": "Trello-style task boards with Markdown-backed cards, labels, dates, checklists, and two-way Nextcloud Deck sync.",
   "author": "Ismail Ivanov",
   "fundingUrl": "https://buymeacoffee.com/carbon06",
   "isDesktopOnly": false

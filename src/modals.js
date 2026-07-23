@@ -27,8 +27,8 @@ const {
   stripImageEmbeds,
   textButton,
   textLine,
-  initials,
 } = require("./helpers");
+const { guessMime } = require("./attachment-sync");
 
 // ---- Markdown <-> HTML for the WYSIWYG description blocks ----
 // A deliberately SMALL, symmetric subset (paragraphs, line breaks, #-headings,
@@ -846,11 +846,9 @@ class CardModal extends Modal {
     this.addingChecklistItem = false;
     this.saveTimer = null;
     this.savePromise = Promise.resolve();
+    // readOnly kept as a permanent false so old branches still short-circuit
+    // cleanly; card locking was removed with the Sync Deck integration.
     this.readOnly = false;
-    this.lockHolder = null;
-    this.lockAcquired = false;
-    this.lockBoardId = null;
-    this.lockHeartbeat = null;
   }
 
   onOpen() {
@@ -884,73 +882,7 @@ class CardModal extends Modal {
     this.editingDetails = false;
     this.localChecklist = clone(card.checklist || []);
     this.localAssignees = clone(card.assignees || []);
-    await this.setupCardLock();
     this.render();
-  }
-
-  /**
-   * Decide whether this card can be edited. If someone else already holds the
-   * lock we open read-only; otherwise we take the lock and keep it warm with a
-   * heartbeat until the modal closes. Offline / no-SyncDeck falls open (editable).
-   */
-  async setupCardLock() {
-    const board = this.plugin.getBoard();
-    this.lockBoardId = board && board.id;
-
-    const holder = this.plugin.getCardLockHolder && this.plugin.getCardLockHolder(this.cardId);
-    if (holder) {
-      this.readOnly = true;
-      this.lockHolder = holder;
-      return;
-    }
-    if (!this.lockBoardId || !this.plugin.acquireCardLock) return;
-
-    const result = await this.plugin.acquireCardLock(this.lockBoardId, this.cardId);
-    if (result && result.ok === false) {
-      this.readOnly = true;
-      this.lockHolder = result.lock || null;
-      return;
-    }
-    this.lockAcquired = !!(result && result.ok && !result.offline);
-    this.plugin.editingCardId = this.cardId;
-    this.startLockHeartbeat();
-  }
-
-  startLockHeartbeat() {
-    this.stopLockHeartbeat();
-    // Re-take the lock well within its server TTL so it never lapses mid-edit.
-    // If the server now reports someone else holds it (we opened while offline,
-    // or another editor took over), drop this modal to read-only.
-    this.lockHeartbeat = window.setInterval(async () => {
-      if (!this.lockBoardId || this.readOnly) return;
-      const result = await this.plugin.acquireCardLock(this.lockBoardId, this.cardId).catch(() => null);
-      if (result && result.ok === false) this.enterReadOnly(result.lock);
-    }, 5000);
-  }
-
-  // Convert an open editable modal into a read-only view after losing the lock.
-  // Unsaved edits are dropped rather than saved, so we never persist a write that
-  // would conflict with the real editor's changes.
-  enterReadOnly(holder) {
-    if (this.readOnly) return;
-    this.readOnly = true;
-    this.lockHolder = holder || this.lockHolder;
-    this.lockAcquired = false;
-    if (this.saveTimer) {
-      window.clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
-    this.stopLockHeartbeat();
-    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
-    new Notice(`🔒 ${(holder && holder.name) || "Someone"} is editing this card`);
-    this.render();
-  }
-
-  stopLockHeartbeat() {
-    if (this.lockHeartbeat) {
-      window.clearInterval(this.lockHeartbeat);
-      this.lockHeartbeat = null;
-    }
   }
 
   /**
@@ -974,100 +906,6 @@ class CardModal extends Modal {
     return this.localLabels.some((item) => labelKey(item) === key);
   }
 
-  renderAssigneesField() {
-    const field = createElement("div", "ot-field ot-assignee-editor");
-    field.append(createElement("span", "", "Members"));
-    const row = createElement("div", "ot-assignee-row");
-
-    const rebuild = () => {
-      row.replaceChildren();
-      (this.localAssignees || []).forEach((assignee) => {
-        const chip = createElement("span", "ot-assignee-chip");
-        const avatar = createElement("span", "ot-card-avatar");
-        avatar.style.setProperty("--ot-avatar-color", assignee.color || "#8b5cf6");
-        const picture = this.plugin.getMemberPicture(assignee.email);
-        if (picture) {
-          const img = createElement("img", "");
-          img.src = picture;
-          img.alt = "";
-          avatar.append(img);
-        } else {
-          avatar.textContent = initials(assignee.name || assignee.email);
-          avatar.classList.add("is-initials");
-        }
-        const remove = iconButton("x", "Remove member", () => {
-          this.localAssignees = (this.localAssignees || []).filter((a) => a.email !== assignee.email);
-          rebuild();
-          this.queueSave();
-        });
-        remove.classList.add("ot-assignee-remove");
-        chip.append(avatar, createElement("span", "ot-assignee-name", assignee.name || assignee.email), remove);
-        row.append(chip);
-      });
-      const addButton = iconButton("plus", "Assign a member", (event) => this.showMemberMenu(event, rebuild));
-      addButton.classList.add("ot-assignee-add");
-      row.append(addButton);
-    };
-
-    rebuild();
-    field.append(row);
-    return field;
-  }
-
-  showMemberMenu(event, rebuild) {
-    const members = this.plugin.getVaultMembers();
-    const menu = new Menu();
-    if (!members.length) {
-      menu.addItem((item) => item.setTitle("No members — sign in to Sync Deck").setDisabled(true));
-    } else {
-      members.forEach((member) => {
-        const assigned = (this.localAssignees || []).some((a) => a.email === member.email);
-        menu.addItem((item) => {
-          item.setTitle(member.name || member.email).setChecked(assigned).onClick(() => {
-            if (assigned) {
-              this.localAssignees = (this.localAssignees || []).filter((a) => a.email !== member.email);
-            } else {
-              this.localAssignees = [...(this.localAssignees || []), { email: member.email, name: member.name, color: member.color }];
-            }
-            rebuild();
-            this.queueSave();
-          });
-        });
-      });
-    }
-    menu.showAtMouseEvent(event);
-  }
-
-  // Single-member picker for one checklist item (leftmost circle).
-  showChecklistMemberMenu(event, item, rerender) {
-    const members = this.plugin.getVaultMembers();
-    const menu = new Menu();
-    menu.addItem((mi) => mi
-      .setTitle("Unassigned")
-      .setChecked(!(item.assignee && item.assignee.email))
-      .onClick(() => {
-        item.assignee = null;
-        rerender();
-        this.saveNow().catch(console.error);
-      }));
-    if (!members.length) {
-      menu.addItem((mi) => mi.setTitle("No members — sign in to Sync Deck").setDisabled(true));
-    } else {
-      members.forEach((member) => {
-        const current = !!(item.assignee && item.assignee.email === member.email);
-        menu.addItem((mi) => mi
-          .setTitle(member.name || member.email)
-          .setChecked(current)
-          .onClick(() => {
-            item.assignee = { email: member.email, name: member.name, color: member.color };
-            rerender();
-            this.saveNow().catch(console.error);
-          }));
-      });
-    }
-    menu.showAtMouseEvent(event);
-  }
-
   render() {
     const card = this.card;
     this.contentEl.replaceChildren();
@@ -1083,8 +921,8 @@ class CardModal extends Modal {
     });
 
     const labelsField = this.notesOnly ? null : this.renderLabelsField();
-    const assigneesField = this.notesOnly ? null : this.renderAssigneesField();
     const detailsField = this.renderDetailsField();
+    const attachmentsField = this.renderAttachmentsField();
     const checklistField = this.renderChecklistField();
 
     const actions = createElement("div", "ot-modal-actions");
@@ -1123,46 +961,17 @@ class CardModal extends Modal {
 
     actions.append(deleteButton, openNote, exportPdf, close);
 
-    const editableFields = this.notesOnly ? [detailsField, checklistField] : [labelsField, assigneesField, detailsField, checklistField];
-    const children = [title, ...editableFields, actions];
-    if (this.readOnly) {
-      this.contentEl.addClass("ot-card-readonly");
-      const holderName = (this.lockHolder && this.lockHolder.name) || "Someone";
-      children.unshift(createElement("div", "ot-card-lock-banner", `🔒 ${holderName} is editing this card — read only`));
-    }
-    this.contentEl.append(...children);
+    const editableFields = this.notesOnly
+      ? [detailsField, checklistField]
+      : [labelsField, detailsField, attachmentsField, checklistField];
+    this.contentEl.append(title, ...editableFields, actions);
 
-    if (this.readOnly) {
-      title.disabled = true;
-      deleteButton.disabled = true;
-      this.disableEditing(editableFields);
-    } else if (!this.editingDetails) {
+    if (!this.editingDetails) {
       requestAnimationFrame(() => title.focus());
     }
   }
 
-  // Freeze every editable control inside the given fields so a read-only viewer
-  // can look but not change anything (Open note / Close stay usable).
-  disableEditing(fields) {
-    fields.forEach((field) => {
-      field.querySelectorAll("input, textarea, button, [contenteditable]").forEach((el) => {
-        if (el.classList.contains("ot-image-tile")) return;
-        if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "BUTTON") {
-          el.disabled = true;
-        } else {
-          el.setAttribute("contenteditable", "false");
-        }
-        el.classList.add("is-disabled");
-      });
-    });
-  }
-
   onClose() {
-    this.stopLockHeartbeat();
-    if (!this.readOnly && this.lockBoardId && this.plugin.releaseCardLock) {
-      this.plugin.releaseCardLock(this.lockBoardId, this.cardId).catch(() => {});
-    }
-    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
     if (this.saveTimer) {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
@@ -2386,10 +2195,15 @@ class CardModal extends Modal {
         && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\./i.test(rawName);
       const fileName = safeImageFileName(realName ? rawName : `Pasted image ${imageStamp()}.${ext}`, ext);
       const sourcePath = (this.card && this.card.filePath) || "";
-      // Card media lives in <board>/attachments so the board folder stays tidy.
+      // Card media lives in <board>/attachments/<cardId>/ so that
+      // attachment-sync can scan a card-scoped directory rather than
+      // fishing through a flat, board-shared folder. Also keeps
+      // per-card attachments tidy on rename/delete.
       const board = this.plugin.findBoardForCard(this.card);
       let targetPath;
-      if (board && board.folderPath) {
+      if (board && board.folderPath && this.card && this.card.id) {
+        targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${this.card.id}/${fileName}`);
+      } else if (board && board.folderPath) {
         targetPath = this.uniqueVaultPath(`${board.folderPath}/attachments/${fileName}`);
       } else {
         const fm = this.app.fileManager;
@@ -2416,6 +2230,10 @@ class CardModal extends Modal {
       // Persist the binary and its embed together (not just the debounced save),
       // so a crash right after can't leave an unreferenced attachment.
       await this.saveNow();
+      // Reflect the new file in the Attachments panel immediately — the
+      // panel's render() also scans the per-card directory so the tile
+      // shows up as "pending upload" until the next sync.
+      if (this.attachmentsRefresh) this.attachmentsRefresh();
     } catch (error) {
       console.error(error);
       new Notice("Couldn't add the image.");
@@ -2460,6 +2278,172 @@ class CardModal extends Modal {
       embed.replaceChildren(img);
       embed.classList.add("image-embed", "media-embed", "is-loaded");
     });
+  }
+
+  /**
+   * Renders the "Attachments" panel below the description. Lists items
+   * from `card.attachments[]` plus any local files in the per-card
+   * attachment folder that haven't yet been ingested by attachment-sync
+   * (they show up before the next sync round). Each tile supports opening
+   * the file in a new pane and moving it to trash — deletion goes through
+   * `app.vault.trash()` so the plugin's existing `handleAttachmentDelete`
+   * hook enqueues the remote reap without any extra plumbing here.
+   */
+  renderAttachmentsField() {
+    const field = createElement("section", "ot-field ot-attachments-field");
+    const header = createElement("div", "ot-attachments-heading");
+    const icon = createElement("span", "ot-attachments-icon");
+    try { setIcon(icon, "paperclip"); } catch (error) { icon.textContent = ""; }
+    const titleEl = createElement("span", "", "Attachments");
+    const count = createElement("span", "ot-attachments-count", "");
+    const addBtn = iconButton("plus", "Add attachment", () => this.triggerAttachmentUpload());
+    header.append(icon, titleEl, count, addBtn);
+
+    const list = createElement("div", "ot-attachments-list");
+
+    const render = () => {
+      list.replaceChildren();
+
+      // Union of tracked attachments (with fileid/remoteId) and any file
+      // still sitting in the per-card attachment folder locally. We show
+      // both so the user can immediately see a screenshot they just
+      // pasted, even though sync hasn't uploaded it yet.
+      const tracked = Array.isArray(this.card.attachments) ? this.card.attachments : [];
+      const seenPaths = new Set(tracked.filter((a) => a && a.filePath).map((a) => a.filePath));
+
+      const board = this.plugin.findBoardForCard(this.card);
+      const pending = [];
+      if (board && board.folderPath && this.card && this.card.id) {
+        const dir = `${board.folderPath}/attachments/${this.card.id}`;
+        const dirRef = this.app.vault.getAbstractFileByPath(dir);
+        if (dirRef && dirRef.children) {
+          for (const child of dirRef.children) {
+            if (!child || child.children) continue; // skip folders
+            if (seenPaths.has(child.path)) continue;
+            pending.push({
+              filePath: child.path,
+              filename: child.name,
+              contentType: guessMime(child.name),
+              pending: true,
+            });
+          }
+        }
+      }
+
+      const items = tracked.concat(pending);
+      count.textContent = items.length ? `(${items.length})` : "";
+      if (!items.length) {
+        list.append(createElement("div", "ot-attachments-empty", "No attachments"));
+        return;
+      }
+      for (const att of items) {
+        list.append(this.buildAttachmentTile(att, render));
+      }
+    };
+
+    this.attachmentsRefresh = render;
+    render();
+    field.append(header, list);
+    return field;
+  }
+
+  buildAttachmentTile(attachment, onRefresh) {
+    const tile = createElement("div", "ot-attachment-tile");
+    if (attachment.pending) tile.addClass("is-pending");
+    const file = attachment.filePath ? this.app.vault.getAbstractFileByPath(attachment.filePath) : null;
+    const isImage = /^image\//i.test(attachment.contentType || "");
+
+    const thumb = createElement("div", "ot-attachment-thumb");
+    if (file && isImage && typeof this.app.vault.getResourcePath === "function") {
+      const img = createElement("img", "ot-attachment-image");
+      img.src = this.app.vault.getResourcePath(file);
+      img.alt = attachment.filename || "";
+      thumb.append(img);
+    } else {
+      const iconEl = createElement("span", "ot-attachment-icon");
+      try { setIcon(iconEl, isImage ? "image" : "file"); } catch (error) { iconEl.textContent = ""; }
+      thumb.append(iconEl);
+    }
+
+    const meta = createElement("div", "ot-attachment-meta");
+    const name = createElement("div", "ot-attachment-name", attachment.filename || "unnamed");
+    name.title = attachment.filePath || attachment.filename || "";
+    meta.append(name);
+    if (attachment.pending) {
+      meta.append(createElement("div", "ot-attachment-pending", "pending upload"));
+    }
+
+    const actions = createElement("div", "ot-attachment-actions");
+    const copyUrlBtn = iconButton("link", "Copy vault embed link (![[...]])", async () => {
+      if (!attachment.filePath) {
+        new Notice("Attachment has no vault path yet.");
+        return;
+      }
+      const embed = `![[${attachment.filePath}]]`;
+      try {
+        if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(embed);
+        } else {
+          const holder = document.createElement("textarea");
+          holder.value = embed;
+          holder.setAttribute("readonly", "");
+          holder.style.position = "absolute";
+          holder.style.left = "-9999px";
+          document.body.appendChild(holder);
+          holder.select();
+          document.execCommand("copy");
+          document.body.removeChild(holder);
+        }
+        new Notice("Embed link copied to clipboard.");
+      } catch (error) {
+        new Notice(`Copy failed: ${(error && error.message) || error}`);
+      }
+    });
+    const openBtn = iconButton("external-link", "Open", async () => {
+      if (!file) {
+        new Notice("File no longer exists in the vault.");
+        return;
+      }
+      try {
+        await this.app.workspace.getLeaf(true).openFile(file);
+      } catch (error) {
+        new Notice(`Open failed: ${(error && error.message) || error}`);
+      }
+    });
+    const delBtn = iconButton("trash", "Delete", async () => {
+      const label = attachment.filename || attachment.filePath || "this file";
+      if (!window.confirm(`Remove "${label}"? The linked file will be moved to trash.`)) return;
+      if (file) {
+        try { await this.app.vault.trash(file, true); }
+        catch (error) { new Notice(`Delete failed: ${(error && error.message) || error}`); return; }
+      } else if (Array.isArray(this.card.attachments)) {
+        // File already missing from disk (e.g. moved manually); still
+        // drop the tracking entry so the UI clears and reap runs next
+        // sync.
+        const idx = this.card.attachments.indexOf(attachment);
+        if (idx >= 0) this.card.attachments.splice(idx, 1);
+      }
+      this.plugin.markCardDirty(this.card);
+      try { await this.plugin.saveData(this.plugin.data); } catch (error) { /* best-effort */ }
+      onRefresh();
+    });
+    actions.append(copyUrlBtn, openBtn, delBtn);
+
+    tile.append(thumb, meta, actions);
+    return tile;
+  }
+
+  triggerAttachmentUpload() {
+    if (this.readOnly) return;
+    const input = createElement("input", "ot-hidden-file-input");
+    input.type = "file";
+    input.multiple = true;
+    input.addEventListener("change", async () => {
+      const files = Array.from(input.files || []);
+      for (const f of files) await this.insertImageFromFile(f);
+      if (this.attachmentsRefresh) this.attachmentsRefresh();
+    });
+    input.click();
   }
 
   /**
@@ -2523,42 +2507,7 @@ class CardModal extends Modal {
           this.queueSave();
         });
 
-        // Per-item member circle (leftmost): click to assign this item to a member.
-        const assigneeBtn = createElement("button", "ot-checklist-assignee");
-        assigneeBtn.type = "button";
-        const paintAssignee = () => {
-          assigneeBtn.replaceChildren();
-          const a = item.assignee;
-          if (a && a.email) {
-            assigneeBtn.classList.add("is-assigned");
-            assigneeBtn.title = a.name || a.email;
-            const avatar = createElement("span", "ot-card-avatar");
-            avatar.style.setProperty("--ot-avatar-color", a.color || "#8b5cf6");
-            const picture = this.plugin.getMemberPicture(a.email);
-            if (picture) {
-              const img = createElement("img", "");
-              img.src = picture;
-              img.alt = "";
-              avatar.append(img);
-            } else {
-              avatar.textContent = initials(a.name || a.email);
-              avatar.classList.add("is-initials");
-            }
-            assigneeBtn.append(avatar);
-          } else {
-            assigneeBtn.classList.remove("is-assigned");
-            assigneeBtn.title = "Assign member";
-            assigneeBtn.append(createElement("span", "ot-checklist-assignee-empty"));
-          }
-        };
-        paintAssignee();
-        assigneeBtn.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.showChecklistMemberMenu(event, item, paintAssignee);
-        });
-
-        row.append(assigneeBtn, checkbox, input, remove);
+        row.append(checkbox, input, remove);
         list.append(row);
       });
       updateProgress();
@@ -2577,9 +2526,12 @@ class CardModal extends Modal {
       }
 
       const addForm = createElement("form", "ot-checklist-add-form");
-      const addInput = createElement("input", "ot-input");
-      addInput.type = "text";
-      addInput.placeholder = "Checklist item";
+      // A textarea (not a single-line input) so pasting several lines at once
+      // keeps their line breaks — each line becomes its own checklist item on
+      // submit, instead of being flattened into one item's text.
+      const addInput = createElement("textarea", "ot-input ot-checklist-add-input");
+      addInput.rows = 1;
+      addInput.placeholder = "Checklist item (paste multiple lines to add them all)";
       const addButton = createElement("button", "mod-cta", "Add");
       addButtonIcon(addButton, "plus");
       const cancel = iconButton("x", "Cancel", () => {
@@ -2590,25 +2542,43 @@ class CardModal extends Modal {
       addForm.append(addInput, addButton, cancel);
       addForm.addEventListener("submit", (event) => {
         event.preventDefault();
-        const text = textLine(addInput.value);
-        if (!text) {
+        const lines = String(addInput.value || "")
+          .split(/\r?\n/)
+          .map((line) => textLine(line))
+          .filter(Boolean);
+        if (!lines.length) {
           addInput.focus();
           return;
         }
-        this.localChecklist.push({ done: false, text });
+        lines.forEach((text) => this.localChecklist.push({ done: false, text }));
         this.addingChecklistItem = false;
         renderChecklist();
         renderAddArea();
         this.saveNow().catch(console.error);
       });
+      const autoGrow = () => {
+        addInput.style.height = "auto";
+        addInput.style.height = `${addInput.scrollHeight}px`;
+      };
+      addInput.addEventListener("input", autoGrow);
       addInput.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
           this.addingChecklistItem = false;
           renderAddArea();
+          return;
+        }
+        // Enter submits (matching the old single-line input); Shift+Enter still
+        // inserts a newline for anyone typing a multi-line batch by hand.
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          addForm.requestSubmit();
         }
       });
       addArea.append(addForm);
-      requestAnimationFrame(() => addInput.focus());
+      requestAnimationFrame(() => {
+        addInput.focus();
+        autoGrow();
+      });
     };
 
     renderChecklist();
@@ -2662,8 +2632,18 @@ class CardModal extends Modal {
     this.savePromise = this.savePromise
       .then(() => this.plugin.updateCard(card.id, patch, globalLabels))
       .catch((error) => {
-        console.error(error);
-        new Notice("Could not save card.");
+        // Surface the real error so users can share it via the sync log
+        // instead of the opaque "Could not save card." message.
+        console.error("[Nextcloud Deck] save card failed", error);
+        const detail = (error && (error.message || error.toString())) || "unknown error";
+        new Notice(`Could not save card: ${detail}`);
+        if (this.plugin && typeof this.plugin.pushSyncLog === "function") {
+          this.plugin.pushSyncLog({
+            event: "save-card-failed",
+            cardId: card && card.id,
+            message: detail,
+          });
+        }
       });
 
     await this.savePromise;
