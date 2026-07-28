@@ -6,57 +6,76 @@
 [![Sync Deck](https://img.shields.io/badge/cloud%20sync-Sync%20Deck-7c3aed.svg)](https://github.com/ismailivanov/sync-deck)
 [![Support](https://img.shields.io/badge/support-Buy%20Me%20a%20Coffee-ffdd00.svg)](https://buymeacoffee.com/carbon06)
 
-Task Deck is a small kanban board for Obsidian. It keeps the board simple, but every card is still a real Markdown note in your vault.
+Task Deck is a focused kanban and table view for Obsidian. Every card stays a real Markdown note in your vault, so your tasks remain searchable, linkable, portable, and editable outside the board.
 
-I built it for tracking tasks without leaving Obsidian: lists, cards, labels, dates, and checklists in one view. Want it on all your devices, or shared with a team? Pair it with [**Sync Deck**](https://github.com/ismailivanov/sync-deck) for cloud sync and live presence.
+Use it locally with as many boards as you need, or pair it with [**Sync Deck**](https://github.com/ismailivanov/sync-deck) for cross-device sync, shared vaults, member assignment, and live presence.
 
-<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/6bfa709d-2cf8-4900-a274-9e95927541b4" />
+![Task Deck board view with To do, Doing, and Done lists](docs/images/task-deck-board.png)
 
-<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/bf7a2472-60bd-4ce4-81da-d30f92c2bc57" />
+### Card details
 
-<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/90bdd068-7040-4367-bfa0-58ef921b24bc" />
+![Task Deck card editor with labels, Markdown description, and checklist progress](docs/images/task-deck-card.png)
+
+### Table view
+
+![Task Deck table view with status, dates, and labels](docs/images/task-deck-table.png)
+
+<sub>Screenshots were captured from a clean demo vault using Task Deck 0.3.7.</sub>
 
 ## Features
 
-- Kanban lists with drag-and-drop ordering
-- As many boards as you want (unlimited on its own)
-- Each board stores cards as Markdown notes in its own board folder
-- Inline card creation and renaming
-- Global colored labels
-- Start and due dates with a compact date picker
-- Checklist progress on cards
-- Card details rendered as Markdown
-- Picks up Markdown cards you create outside the board
-- Syncs across your devices and team with [Sync Deck](https://github.com/ismailivanov/sync-deck)
+- **Board and table views** for the same set of Markdown-backed tasks.
+- **Drag-and-drop workflow** for cards and list ordering.
+- **Fast editing** with inline card creation, renaming, quick status changes, and undo while the Task Deck view is active.
+- **Rich cards** with colored labels, start and due dates, Markdown descriptions, images, and checklists.
+- **Multiple boards** with independent folders, lists, colors, and cards.
+- **Normal Obsidian notes** that remain searchable, linkable, visible in graph view, and editable from the file explorer.
+- **Automatic note discovery** for compatible Markdown cards created or edited outside Task Deck.
+- **Optional collaboration** through [Sync Deck](https://github.com/ismailivanov/sync-deck), including shared boards, member assignment, and live presence.
 
-## Usage
+## Quick start
 
-- Run `Open board` from the command palette.
-- Create a board with the name you want to use.
-- Switch between boards from the board picker or the boards screen.
-- Use `Add list` to create a new list.
-- Use `Add card` under a list, then type the card name inline.
-- Click a card to edit labels, details, dates, and checklist items.
-- Use `Open note` when you want to work with the card as a normal Markdown file.
-- Drag cards between lists and drag list headers to reorder columns.
+1. Open **Task Deck** from the ribbon or run `Task Deck: Open board` from the command palette.
+2. Create a board. New boards start with **To do**, **Doing**, and **Done** lists.
+3. Add cards inline, then drag them between lists as work moves forward.
+4. Open a card to add labels, dates, a Markdown description, images, and checklist items.
+5. Switch to **Table** when you want a compact overview across every list.
 
-If you create a Markdown card directly inside a board folder, Task Deck will pick it up and show it on that board.
+Use **Open note** in the card editor whenever you want to work directly in the underlying Markdown file.
+
+## Markdown storage
+
+Each board lives in its own readable folder:
+
+```text
+Product Launch/
+├── Product Launch.md
+├── cards/
+│   ├── Prepare onboarding checklist.md
+│   └── Write launch announcement.md
+└── attachments/
+```
+
+The board index keeps list order and graph links connected. Card metadata lives in frontmatter, while the description and checklist remain ordinary Markdown. The plugin folder stores the local UI state; your task content stays in the vault.
 
 ## Sync across devices and teams
 
-Task Deck stores every board and card as plain Markdown in your vault, and [**Sync Deck**](https://github.com/ismailivanov/sync-deck) keeps them in sync — across your devices and with your team.
+Task Deck works fully offline and does not require an account. To sync boards, install [**Sync Deck**](https://github.com/ismailivanov/sync-deck), sign in, and open or create a synced vault.
 
-Install both plugins and sign in to Sync Deck. Your boards then sync everywhere, with **live presence** so you can see who's on which card in real time. There's a **Sync your boards & vaults** button in Task Deck's board view that opens Sync Deck. On the Free plan you can sync one board; Pro syncs unlimited — and Task Deck stays unlimited locally either way.
+Sync Deck carries the board index, cards, and attachments across your devices. In shared vaults it also provides member assignment and live presence, so teammates can see who is viewing or editing a card. The Free plan syncs one Task Deck board; Pro syncs unlimited boards. Local-only Task Deck usage remains unlimited.
 
 ## Install
 
-Download the release files and place them here:
+Until Task Deck is available in the Obsidian community plugin directory:
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/ismailivanov/task-deck/releases/latest).
+2. Put the files in:
 
 ```text
 Your Vault/.obsidian/plugins/task-deck/
 ```
 
-Then enable **Task Deck** from Obsidian's *Community plugins* settings.
+3. Enable **Task Deck** in Obsidian under **Settings → Community plugins**.
 
 ## Development
 
