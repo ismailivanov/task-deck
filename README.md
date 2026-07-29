@@ -62,7 +62,7 @@ The board index keeps list order and graph links connected. Card metadata lives 
 
 Task Deck works fully offline and does not require an account. To sync boards, install [**Sync Deck**](https://github.com/ismailivanov/sync-deck), sign in, and open or create a synced vault.
 
-Sync Deck carries the board index, cards, and attachments across your devices. In shared vaults it also provides member assignment and live presence, so teammates can see who is viewing or editing a card. The Free plan syncs one Task Deck board; Pro syncs unlimited boards. Local-only Task Deck usage remains unlimited.
+Sync Deck carries the board index, cards, and attachments across your devices. New and upgraded Sync Deck vaults end-to-end encrypt those files, their paths, and the board/card identifiers used for presence and locks; account and activity metadata still remain visible to the service. In shared vaults it also provides member assignment and live presence, so teammates can see who is viewing or editing a card. See Sync Deck's [E2EE threat model](https://github.com/ismailivanov/sync-deck/blob/main/docs/E2EE.md) for the exact boundary. The Free plan syncs one Task Deck board; Pro syncs unlimited boards. Local-only Task Deck usage remains unlimited.
 
 ## Install
 

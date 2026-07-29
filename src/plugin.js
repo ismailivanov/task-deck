@@ -698,17 +698,19 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (!syncDeck || !board || !point) return { users: [], locks: [] };
 
     try {
+      const encrypted = syncDeck.activeEncryptionVersion && syncDeck.activeEncryptionVersion() === 1;
+      const boardToken = encrypted ? await syncDeck.blindPresenceId("taskdeck-board", board.id) : board.id;
       const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence`, {
         method: "POST",
         body: {
-          boardId: board.id,
-          boardName: board.name,
+          boardId: boardToken,
+          ...(!encrypted ? { boardName: board.name } : {}),
           x: point.x,
           y: point.y,
           color: syncDeck.data.user.color || "#8b5cf6",
         },
       });
-      return { users: result.users || [], locks: result.locks || [] };
+      return { users: result.users || [], locks: await this.decodeSyncDeckLocks(syncDeck, result.locks, board.id) };
     } catch (error) {
       return null;
     }
@@ -719,8 +721,10 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     if (!syncDeck || !boardId) return { users: [], locks: [] };
 
     try {
-      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardId)}`);
-      return { users: result.users || [], locks: result.locks || [] };
+      const encrypted = syncDeck.activeEncryptionVersion && syncDeck.activeEncryptionVersion() === 1;
+      const boardToken = encrypted ? await syncDeck.blindPresenceId("taskdeck-board", boardId) : boardId;
+      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/presence?boardId=${encodeURIComponent(boardToken)}`);
+      return { users: result.users || [], locks: await this.decodeSyncDeckLocks(syncDeck, result.locks, boardId) };
     } catch (error) {
       return null;
     }
@@ -732,18 +736,48 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const syncDeck = this.getSyncDeckBridge();
     if (!syncDeck || !boardId || !cardId) return null;
     try {
-      return await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/lock`, {
+      const encrypted = syncDeck.activeEncryptionVersion && syncDeck.activeEncryptionVersion() === 1;
+      const boardToken = encrypted ? await syncDeck.blindPresenceId("taskdeck-board", boardId) : boardId;
+      const cardToken = encrypted ? await syncDeck.blindPresenceId("taskdeck-card", cardId) : cardId;
+      const result = await syncDeck.api(`/vaults/${encodeURIComponent(syncDeck.data.vaultId)}/taskdeck/lock`, {
         method: "POST",
         body: {
-          boardId,
-          cardId,
+          boardId: boardToken,
+          cardId: cardToken,
           action,
           color: syncDeck.data.user.color || "#8b5cf6",
         },
       });
+      const locks = await this.decodeSyncDeckLocks(syncDeck, result.locks, boardId);
+      let lock = result.lock || null;
+      if (lock && encrypted) lock = Object.assign({}, lock, { cardId });
+      return Object.assign({}, result, { locks, ...(lock ? { lock } : {}) });
     } catch (error) {
       return null;
     }
+  }
+
+  async decodeSyncDeckLocks(syncDeck, locks, boardId) {
+    if (!Array.isArray(locks)) return [];
+    const encrypted = syncDeck.activeEncryptionVersion && syncDeck.activeEncryptionVersion() === 1;
+    if (!encrypted) return locks;
+    const board = boardId ? this.findBoard(boardId) : null;
+    const boardCardIds = new Set(
+      board ? board.lists.flatMap((list) => Array.isArray(list.cardIds) ? list.cardIds : []) : []
+    );
+    const cards = Object.values(this.data.cards || {}).filter(
+      (card) => !boardId || card.boardId === boardId || boardCardIds.has(card.id)
+    );
+    const pairs = await Promise.all(cards.map(async (card) => [
+      await syncDeck.blindPresenceId("taskdeck-card", card.id),
+      card.id,
+    ]));
+    const ids = new Map(pairs);
+    return locks
+      .map((lock) => lock && ids.has(lock.cardId)
+        ? Object.assign({}, lock, { cardId: ids.get(lock.cardId) })
+        : null)
+      .filter(Boolean);
   }
 
   // Try to take the lock for a card. Returns { ok, lock } — ok:false means
