@@ -1768,7 +1768,7 @@
 .ot-checklist-row {
   display: grid;
   grid-template-columns: 26px 20px minmax(0, 1fr) 30px;
-  align-items: center;
+  align-items: start;
   gap: 8px;
   min-height: 32px;
   border-radius: 6px;
@@ -1807,7 +1807,7 @@
 }
 
 .ot-checklist-row input[type="checkbox"] {
-  margin: 0;
+  margin: 7px 0 0;
 }
 
 .ot-checklist-row:hover,
@@ -1828,14 +1828,27 @@
 }
 
 .ot-checklist-title {
+  display: block;
   width: 100%;
+  min-width: 0;
+  min-height: 28px;
   border: 0;
+  padding: 4px 0;
+  overflow: hidden;
   background: transparent;
+  color: var(--text-normal);
+  font: inherit;
   font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  resize: none;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .ot-checklist-title:focus {
   outline: none;
+  box-shadow: none;
 }
 
 .ot-checklist-add {

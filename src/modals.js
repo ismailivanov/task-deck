@@ -2486,6 +2486,10 @@ class CardModal extends Modal {
     progress.append(progressText, progressTrack);
 
     const list = createElement("div", "ot-checklist");
+    const fitChecklistText = (textarea) => {
+      textarea.style.height = "auto";
+      textarea.style.height = `${textarea.scrollHeight}px`;
+    };
     const updateProgress = () => {
       const stats = checklistStats(this.localChecklist);
       progressText.textContent = `${stats.percent}%`;
@@ -2503,8 +2507,8 @@ class CardModal extends Modal {
         const checkbox = createElement("input");
         checkbox.type = "checkbox";
         checkbox.checked = !!item.done;
-        const input = createElement("input", "ot-checklist-title");
-        input.type = "text";
+        const input = createElement("textarea", "ot-checklist-title");
+        input.rows = 1;
         input.value = item.text || "";
         const remove = iconButton("x", "Remove item", () => {
           this.localChecklist.splice(index, 1);
@@ -2520,7 +2524,14 @@ class CardModal extends Modal {
         });
         input.addEventListener("input", () => {
           item.text = input.value;
+          fitChecklistText(input);
           this.queueSave();
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            input.blur();
+          }
         });
 
         // Per-item member circle (leftmost): click to assign this item to a member.
@@ -2560,6 +2571,7 @@ class CardModal extends Modal {
 
         row.append(assigneeBtn, checkbox, input, remove);
         list.append(row);
+        requestAnimationFrame(() => fitChecklistText(input));
       });
       updateProgress();
     };
