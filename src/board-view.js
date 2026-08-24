@@ -1430,6 +1430,17 @@ class BoardView extends ItemView {
         .setIcon("calendar-days")
         .onClick(() => new CardDatesModal(this.app, this.plugin, card.id).open());
     });
+    const board = this.plugin.getBoard();
+    if (board && board.lists.length > 1) {
+      board.lists
+        .filter((list) => !list.cardIds.includes(card.id))
+        .forEach((list) => {
+          menu.addItem((item) => item
+            .setTitle(`Move to ${list.title}`)
+            .setIcon("arrow-right")
+            .onClick(() => this.plugin.moveCard(card.id, list.id)));
+        });
+    }
     menu.addItem((item) => {
       item
         .setTitle("Delete card")
@@ -1458,6 +1469,20 @@ class BoardView extends ItemView {
           new ListColorModal(this.app, list.title, list.color, (color) => this.plugin.setListColor(list.id, color)).open();
         });
     });
+    const board = this.plugin.getBoard();
+    const index = board ? board.lists.findIndex((item) => item.id === list.id) : -1;
+    if (index > 0) {
+      menu.addItem((item) => item
+        .setTitle("Move list left")
+        .setIcon("arrow-left")
+        .onClick(() => this.plugin.moveList(list.id, board.lists[index - 1].id)));
+    }
+    if (board && index >= 0 && index < board.lists.length - 1) {
+      menu.addItem((item) => item
+        .setTitle("Move list right")
+        .setIcon("arrow-right")
+        .onClick(() => this.plugin.moveList(list.id, board.lists[index + 1].id, true)));
+    }
     menu.addItem((item) => {
       item
         .setTitle("Delete list")
