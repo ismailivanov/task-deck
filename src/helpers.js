@@ -134,6 +134,19 @@ function cleanLabelName(label) {
   return name;
 }
 
+/** Suggests familiar colors for common label names; unknown labels stay blue. */
+function suggestedLabelColor(name) {
+  const words = textLine(name).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const has = (...values) => values.some((value) => words.includes(value));
+  if (has("bug", "defect", "error", "crash", "hata")) return "#be332b";
+  if (has("urgent", "critical", "blocker", "acil", "kritik")) return "#f46b66";
+  if (has("feature", "enhancement", "özellik", "yenilik")) return "#247b55";
+  if (has("ui", "ux", "design", "tasarım")) return "#6f338f";
+  if (has("test", "qa")) return "#a64b00";
+  if (has("doc", "docs", "documentation", "belge", "doküman")) return "#2465c7";
+  return DEFAULT_LABEL_COLOR;
+}
+
 /**
  * Builds a readable vault-safe card filename from a title.
  */
@@ -146,6 +159,33 @@ function cardFileBaseName(value) {
     .slice(0, 80);
 
   return name || "Card";
+}
+
+/** Obsidian wikilink used when one card references another. */
+function cardReferenceMarkup(card, label) {
+  if (!card) return "";
+  const target = String(card.filePath || card.title || "Card")
+    .replace(/\.md$/i, "")
+    .replace(/[\[\]|]/g, " ")
+    .trim();
+  const alias = textLine(label || card.title || target).replace(/[\[\]|]/g, " ").trim();
+  return target ? `[[${target}|${alias || target.split("/").pop()}]]` : "";
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(String(text || ""));
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = String(text || "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  let copied = false;
+  try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+  if (!copied) throw new Error("clipboard write unsupported");
 }
 
 function tagPart(value) {
@@ -673,7 +713,10 @@ module.exports = {
   parseBoolean,
   labelKey,
   cleanLabelName,
+  suggestedLabelColor,
   cardFileBaseName,
+  cardReferenceMarkup,
+  copyTextToClipboard,
   taskDeckListTag,
   imageTarget,
   isImagePath,

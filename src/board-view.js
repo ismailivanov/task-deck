@@ -7,7 +7,9 @@ const {
   TASK_DECK_ICON,
   VIEW_TYPE,
   addButtonIcon,
+  cardReferenceMarkup,
   checklistStats,
+  copyTextToClipboard,
   createElement,
   dateRangeLabel,
   initials,
@@ -16,7 +18,7 @@ const {
   textButton,
   textLine,
 } = require("./helpers");
-const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal } = require("./modals");
+const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal, exportBoardPdf } = require("./modals");
 
 // Live board presence (SyncDeck cursors) tuning.
 // The transport stays plain HTTP polling; smoothness comes from client-side
@@ -104,6 +106,7 @@ class BoardView extends ItemView {
     actions.append(
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
+      textButton("download", "Export PDF", () => exportBoardPdf(this.app, this.plugin, board).catch(console.error)),
       textButton("plus", "Add list", () => this.plugin.addList())
     );
     toolbar.append(actions);
@@ -1443,6 +1446,19 @@ class BoardView extends ItemView {
     }
     menu.addItem((item) => {
       item
+        .setTitle("Copy card reference")
+        .setIcon("copy")
+        .onClick(async () => {
+          try {
+            await copyTextToClipboard(cardReferenceMarkup(card));
+            new Notice("Card reference copied");
+          } catch (error) {
+            new Notice("Could not copy the card reference.");
+          }
+        });
+    });
+    menu.addItem((item) => {
+      item
         .setTitle("Delete card")
         .setIcon("trash")
         .onClick(async () => {
@@ -1495,6 +1511,12 @@ class BoardView extends ItemView {
   showBoardMenu(event, board) {
     event.stopPropagation();
     const menu = new Menu();
+    menu.addItem((item) => {
+      item
+        .setTitle("Export board as PDF")
+        .setIcon("download")
+        .onClick(() => exportBoardPdf(this.app, this.plugin, board).catch(console.error));
+    });
     menu.addItem((item) => {
       item
         .setTitle("Rename board")

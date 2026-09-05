@@ -2453,6 +2453,21 @@ body.ot-col-resizing {
 .ot-block-text a {
   color: var(--interactive-accent);
 }
+.ot-block-text .task-card-ref,
+.ot-markdown-preview .internal-link {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 32%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
+  color: var(--interactive-accent);
+  font-weight: 650;
+  text-decoration: none;
+}
+.ot-block-text .task-card-ref::before,
+.ot-markdown-preview .internal-link::before {
+  content: "↗ ";
+}
 .ot-block-image {
   position: relative;
   display: inline-block;

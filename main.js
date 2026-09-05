@@ -137,6 +137,19 @@ function cleanLabelName(label) {
   return name;
 }
 
+/** Suggests familiar colors for common label names; unknown labels stay blue. */
+function suggestedLabelColor(name) {
+  const words = textLine(name).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const has = (...values) => values.some((value) => words.includes(value));
+  if (has("bug", "defect", "error", "crash", "hata")) return "#be332b";
+  if (has("urgent", "critical", "blocker", "acil", "kritik")) return "#f46b66";
+  if (has("feature", "enhancement", "özellik", "yenilik")) return "#247b55";
+  if (has("ui", "ux", "design", "tasarım")) return "#6f338f";
+  if (has("test", "qa")) return "#a64b00";
+  if (has("doc", "docs", "documentation", "belge", "doküman")) return "#2465c7";
+  return DEFAULT_LABEL_COLOR;
+}
+
 /**
  * Builds a readable vault-safe card filename from a title.
  */
@@ -149,6 +162,33 @@ function cardFileBaseName(value) {
     .slice(0, 80);
 
   return name || "Card";
+}
+
+/** Obsidian wikilink used when one card references another. */
+function cardReferenceMarkup(card, label) {
+  if (!card) return "";
+  const target = String(card.filePath || card.title || "Card")
+    .replace(/\.md$/i, "")
+    .replace(/[\[\]|]/g, " ")
+    .trim();
+  const alias = textLine(label || card.title || target).replace(/[\[\]|]/g, " ").trim();
+  return target ? `[[${target}|${alias || target.split("/").pop()}]]` : "";
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(String(text || ""));
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = String(text || "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  let copied = false;
+  try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+  if (!copied) throw new Error("clipboard write unsupported");
 }
 
 function tagPart(value) {
@@ -676,7 +716,10 @@ module.exports = {
   parseBoolean,
   labelKey,
   cleanLabelName,
+  suggestedLabelColor,
   cardFileBaseName,
+  cardReferenceMarkup,
+  copyTextToClipboard,
   taskDeckListTag,
   imageTarget,
   isImagePath,
@@ -718,6 +761,7 @@ const {
   addButtonIcon,
   checklistStats,
   cardFileBaseName,
+  cardReferenceMarkup,
   cleanDate,
   cleanColor,
   cleanLabelName,
@@ -733,6 +777,7 @@ const {
   imageMarkupWithSize,
   isoFromDate,
   labelKey,
+  suggestedLabelColor,
   stripImageEmbeds,
   textButton,
   textLine,
@@ -741,7 +786,7 @@ const {
 
 // ---- Markdown <-> HTML for the WYSIWYG description blocks ----
 // A deliberately SMALL, symmetric subset (paragraphs, line breaks, #-headings,
-// -/1. lists, > quotes, ---, **bold**, *italic*, `code`, [link](url)) so that
+// -/1. lists, > quotes, ---, **bold**, *italic*, `code`, links and [[card|label]]) so that
 // md -> html -> md round-trips bytes for everything these converters produce.
 // Unrecognized markdown stays literal text and survives untouched.
 function escapeDetailsHtml(text) {
@@ -753,6 +798,11 @@ function inlineMdToHtml(text) {
   out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   out = out.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
+  out = out.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, target, alias) => {
+    const path = target.trim();
+    const label = (alias || path.split("/").pop() || path).trim();
+    return `<a class="task-card-ref" data-task-card-path="${path.replace(/"/g, "&quot;")}" href="${path.replace(/"/g, "&quot;")}">${label}</a>`;
+  });
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
   return out;
 }
@@ -834,7 +884,9 @@ function detailsHtmlToMd(root) {
       if (tag === "B" || tag === "STRONG") out += inner.trim() ? `**${inner}**` : inner;
       else if (tag === "I" || tag === "EM") out += inner.trim() ? `*${inner}*` : inner;
       else if (tag === "CODE") out += inner.trim() ? `\`${inner}\`` : inner;
-      else if (tag === "A") out += `[${inner || child.getAttribute("href") || "link"}](${child.getAttribute("href") || ""})`;
+      else if (tag === "A" && child.getAttribute("data-task-card-path")) {
+        out += `[[${child.getAttribute("data-task-card-path")}|${inner || "Card"}]]`;
+      } else if (tag === "A") out += `[${inner || child.getAttribute("href") || "link"}](${child.getAttribute("href") || ""})`;
       else out += inner;
     });
     return out;
@@ -897,6 +949,150 @@ function detailsHtmlToMd(root) {
   const parts = [];
   serializeChildren(root, parts);
   return parts.join("\n\n").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function splitDetails(markdown) {
+  const text = String(markdown || "");
+  const re = /!\[\[([^\]]+)\]\]|!\[[^\]]*\]\(([^)]+)\)/g;
+  const imageExtension = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)(\?|#|$)/i;
+  const segments = [];
+  let last = 0;
+  let match;
+  while ((match = re.exec(text))) {
+    const isWiki = match[1] !== undefined;
+    let target = (isWiki ? match[1] : match[2]) || "";
+    target = target.split("|")[0].split("#")[0].trim();
+    if (!isWiki) target = target.split(/\s+/)[0];
+    if (!imageExtension.test(target)) continue;
+    if (match.index > last) segments.push({ type: "md", text: text.slice(last, match.index) });
+    segments.push({ type: "img", target, markup: match[0], start: match.index, end: match.index + match[0].length });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) segments.push({ type: "md", text: text.slice(last) });
+  if (!segments.length) segments.push({ type: "md", text });
+  return segments;
+}
+
+function electronPdfRemote() {
+  let remote = null;
+  try { remote = window.require && window.require("@electron/remote"); } catch (error) { remote = null; }
+  if (!remote) {
+    try { remote = window.require && window.require("electron").remote; } catch (error) { remote = null; }
+  }
+  return remote && remote.BrowserWindow && remote.dialog ? remote : null;
+}
+
+async function descriptionPdfHtml(app, plugin, card) {
+  const parts = [];
+  let imageRun = [];
+  const flushImages = () => {
+    if (!imageRun.length) return;
+    if (imageRun.length === 1) {
+      const image = imageRun[0];
+      const sizing = image.width ? ` style="width:${Math.min(image.width, 660)}px"` : "";
+      parts.push(`<img src="${image.src}"${sizing}>`);
+    } else {
+      const images = imageRun.map((image) => {
+        const percent = Math.min(100, Math.max(12, Math.round(((image.width || 380) / 8) * 10) / 10));
+        return `<img src="${image.src}" style="width: calc(${percent}% - 8px)">`;
+      }).join("");
+      parts.push(`<div class="imgrow">${images}</div>`);
+    }
+    imageRun = [];
+  };
+
+  for (const segment of splitDetails(card.details || "")) {
+    if (segment.type === "img") {
+      const resolved = plugin.resolveCardImage(card, segment.target);
+      if (resolved && resolved.file) {
+        try {
+          const binary = await app.vault.readBinary(resolved.file);
+          const extension = (resolved.file.extension || "png").toLowerCase();
+          const mime = extension === "svg" ? "image/svg+xml" : (extension === "jpg" ? "image/jpeg" : `image/${extension}`);
+          imageRun.push({
+            src: `data:${mime};base64,${arrayBufferToBase64(binary)}`,
+            width: imageSizeFromMarkup(segment.markup),
+          });
+        } catch (error) { /* one unreadable image should not block the PDF */ }
+      }
+      continue;
+    }
+    if (!segment.text.trim()) continue;
+    flushImages();
+    parts.push(detailsMdToHtml(segment.text));
+  }
+  flushImages();
+  return parts.join("");
+}
+
+async function cardPdfArticle(app, plugin, card, board, list, headingLevel, className = "card") {
+  const esc = escapeDetailsHtml;
+  const labels = (card.labels || [])
+    .map((label) => `<span class="pill" style="background:${esc(label.color || DEFAULT_LABEL_COLOR)}">${esc(label.name)}</span>`)
+    .join("");
+  const members = (card.assignees || []).map((assignee) => assignee.name || assignee.email).filter(Boolean).join(", ");
+  const dates = dateRangeLabel(card.startDate, card.dueDate) || "";
+  const checklist = (card.checklist || [])
+    .map((item) => `<div class="chk"><span class="box">${item.done ? "☑" : "☐"}</span><span class="${item.done ? "done" : ""}">${esc(item.text || "")}</span>${item.assignee && (item.assignee.name || item.assignee.email) ? `<span class="who"> — ${esc(item.assignee.name || item.assignee.email)}</span>` : ""}</div>`)
+    .join("");
+  const meta = [
+    board ? esc(board.name) : "",
+    list ? esc(list.title) : "",
+    card.completed ? "Completed" : "",
+    dates ? esc(dates) : "",
+  ].filter(Boolean).join(" • ");
+  const description = await descriptionPdfHtml(app, plugin, card);
+  const level = Math.max(1, Math.min(6, headingLevel || 1));
+  return `<article class="${className}">
+    <h${level}>${esc(card.title || "Card")}</h${level}>
+    ${meta ? `<div class="meta">${meta}</div>` : ""}
+    ${labels ? `<div>${labels}</div>` : ""}
+    ${members ? `<div class="meta members">Members: ${esc(members)}</div>` : ""}
+    ${description ? `<div class="section"><h4>Description</h4>${description}</div>` : ""}
+    ${checklist ? `<div class="section"><h4>Checklist</h4>${checklist}</div>` : ""}
+  </article>`;
+}
+
+function pdfDocument(title, body) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeDetailsHtml(title)}</title><style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1f2328; margin: 42px; line-height: 1.5; }
+    h1 { font-size: 26px; margin: 0 0 6px; } h2 { font-size: 20px; margin: 28px 0 8px; }
+    h3 { font-size: 18px; margin: 0 0 6px; break-after: avoid; } h4 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+    .meta { color: #667085; font-size: 13px; margin-bottom: 12px; } .members { margin-top: 8px; }
+    .pill { display: inline-block; color: #fff; border-radius: 4px; padding: 2px 10px; font-size: 12px; font-weight: 700; margin: 0 6px 6px 0; }
+    .section { margin-top: 22px; } .board-card { border-top: 1px solid #d0d5dd; margin-top: 18px; padding-top: 18px; }
+    img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
+    .imgrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 10px 0; } .imgrow img { margin: 0; }
+    .chk { margin: 4px 0; } .box { margin-right: 7px; } .done { text-decoration: line-through; color: #98a2b3; } .who { color: #667085; font-size: 12px; }
+    blockquote { border-left: 3px solid #e5e7eb; margin: 8px 0; padding: 2px 12px; color: #667085; }
+    code { background: #f2f4f7; padding: 1px 5px; border-radius: 4px; } ul, ol { padding-left: 22px; } p { margin: 0 0 0.6em; }
+    .task-card-ref { display: inline-block; color: #175cd3; background: #eff4ff; border: 1px solid #b2ccff; border-radius: 4px; padding: 0 5px; font-weight: 600; text-decoration: none; }
+    .task-card-ref::before { content: "↗ "; }
+  </style></head><body>${body}</body></html>`;
+}
+
+async function savePdf(remote, html, defaultName) {
+  const chosen = await remote.dialog.showSaveDialog({
+    defaultPath: `${String(defaultName || "Task Deck").replace(/[\\/:*?"<>|]/g, "-").trim() || "Task Deck"}.pdf`,
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (!chosen || chosen.canceled || !chosen.filePath) return false;
+  const fs = window.require("fs");
+  const os = window.require("os");
+  const pathMod = window.require("path");
+  const tmpPath = pathMod.join(os.tmpdir(), `task-deck-${Date.now()}.html`);
+  fs.writeFileSync(tmpPath, html, "utf8");
+  const win = new remote.BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+  try {
+    await win.loadFile(tmpPath);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: "A4" });
+    fs.writeFileSync(chosen.filePath, pdf);
+    return true;
+  } finally {
+    win.destroy();
+    try { fs.unlinkSync(tmpPath); } catch (error) { /* temp cleanup is best-effort */ }
+  }
 }
 
 // Drag payload type for reordering image blocks inside the description editor.
@@ -1019,6 +1215,7 @@ class LabelPickerModal extends Modal {
     this.query = "";
     this.createName = "";
     this.createColor = DEFAULT_LABEL_COLOR;
+    this.colorChosen = false;
   }
 
   onOpen() {
@@ -1079,6 +1276,7 @@ class LabelPickerModal extends Modal {
     this.query = "";
     this.createName = "";
     this.createColor = DEFAULT_LABEL_COLOR;
+    this.colorChosen = false;
     this.emitChange();
     this.render();
   }
@@ -1088,6 +1286,7 @@ class LabelPickerModal extends Modal {
     this.editingKey = labelKey(label);
     this.createName = label.name;
     this.createColor = label.color || DEFAULT_LABEL_COLOR;
+    this.colorChosen = true;
     this.render();
   }
 
@@ -1154,7 +1353,8 @@ class LabelPickerModal extends Modal {
         this.creating = true;
         this.editingKey = null;
         this.createName = this.query;
-        this.createColor = DEFAULT_LABEL_COLOR;
+        this.createColor = suggestedLabelColor(this.query);
+        this.colorChosen = false;
         this.render();
       });
       createArea.append(create);
@@ -1193,30 +1393,38 @@ class LabelPickerModal extends Modal {
     const colorField = createElement("div", "ot-field");
     colorField.append(createElement("span", "", "Choose color"));
     const swatches = createElement("div", "ot-label-color-grid");
+    const swatchByColor = new Map();
+    const paintSwatches = () => {
+      swatchByColor.forEach((swatch, color) => {
+        const selected = color === this.createColor;
+        swatch.classList.toggle("is-selected", selected);
+        swatch.replaceChildren();
+        if (!selected) return;
+        try { setIcon(swatch, "check"); } catch (error) { swatch.textContent = "✓"; }
+      });
+    };
     LABEL_COLORS.forEach((color) => {
       const swatch = createElement("button", "ot-label-color-swatch");
       swatch.type = "button";
       swatch.style.backgroundColor = color;
       swatch.setAttribute("aria-label", color);
-      if (color === this.createColor) {
-        swatch.classList.add("is-selected");
-        try {
-          setIcon(swatch, "check");
-        } catch (error) {
-          swatch.textContent = "✓";
-        }
-      }
+      swatchByColor.set(color, swatch);
       swatch.addEventListener("click", () => {
         this.createColor = color;
-        this.render();
+        this.colorChosen = true;
+        preview.style.backgroundColor = color;
+        paintSwatches();
       });
       swatches.append(swatch);
     });
+    paintSwatches();
     colorField.append(swatches);
 
     const removeColor = textButton("x", "Remove color", () => {
       this.createColor = "#6f737a";
-      this.render();
+      this.colorChosen = true;
+      preview.style.backgroundColor = this.createColor;
+      paintSwatches();
     });
     removeColor.classList.add("ot-remove-color-button");
 
@@ -1229,6 +1437,11 @@ class LabelPickerModal extends Modal {
     title.addEventListener("input", () => {
       this.createName = title.value;
       preview.textContent = this.createName || "Label preview";
+      if (!this.colorChosen) {
+        this.createColor = suggestedLabelColor(this.createName);
+        preview.style.backgroundColor = this.createColor;
+        paintSwatches();
+      }
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1560,6 +1773,7 @@ class CardModal extends Modal {
     this.lockAcquired = false;
     this.lockBoardId = null;
     this.lockHeartbeat = null;
+    this.closeSaveDone = false;
   }
 
   onOpen() {
@@ -1813,11 +2027,13 @@ class CardModal extends Modal {
     deleteButton.addEventListener("click", async () => {
       if (!window.confirm("Delete this card and its linked Markdown note?")) return;
       await this.plugin.deleteCard(card.id);
+      this.closeSaveDone = true;
       this.close();
     });
 
     openNote.addEventListener("click", async () => {
       await this.saveNow();
+      this.closeSaveDone = true;
       await this.plugin.openCardFile(card.id);
       this.close();
     });
@@ -1827,6 +2043,7 @@ class CardModal extends Modal {
 
     close.addEventListener("click", async () => {
       await this.saveNow();
+      this.closeSaveDone = true;
       this.close();
     });
 
@@ -1868,15 +2085,18 @@ class CardModal extends Modal {
 
   onClose() {
     this.stopLockHeartbeat();
-    if (!this.readOnly && this.lockBoardId && this.plugin.releaseCardLock) {
-      this.plugin.releaseCardLock(this.lockBoardId, this.cardId).catch(() => {});
-    }
-    if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
-    if (this.saveTimer) {
-      window.clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-      this.saveNow().catch(console.error);
-    }
+    // The window's X is a commit too. In particular, the description editor
+    // keeps its live value in detailsDraft until its own Save button is used.
+    // Save before releasing the collaborative lock so that closing can never
+    // silently discard that draft or race another editor.
+    const needsSave = !this.readOnly && !this.closeSaveDone && (this.editingDetails || this.saveTimer);
+    const persist = needsSave ? this.saveNow() : this.savePromise;
+    persist.catch(console.error).finally(() => {
+      if (!this.readOnly && this.lockBoardId && this.plugin.releaseCardLock) {
+        this.plugin.releaseCardLock(this.lockBoardId, this.cardId).catch(() => {});
+      }
+      if (this.plugin.editingCardId === this.cardId) this.plugin.editingCardId = null;
+    });
     this.contentEl.replaceChildren();
   }
 
@@ -1927,28 +2147,7 @@ class CardModal extends Modal {
    * inline, in the order they appear: [{type:'md',text} | {type:'img',target}].
    */
   splitDetailSegments(markdown) {
-    const text = String(markdown || "");
-    const re = /!\[\[([^\]]+)\]\]|!\[[^\]]*\]\(([^)]+)\)/g;
-    const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)(\?|#|$)/i;
-    const segments = [];
-    let last = 0;
-    let match;
-    while ((match = re.exec(text))) {
-      const isWiki = match[1] !== undefined;
-      let target = (isWiki ? match[1] : match[2]) || "";
-      target = target.split("|")[0].split("#")[0].trim();
-      if (!isWiki) target = target.split(/\s+/)[0]; // md link: drop optional "title"
-      if (!IMG_EXT.test(target)) continue; // not an image link — leave it in the text
-      if (match.index > last) segments.push({ type: "md", text: text.slice(last, match.index) });
-      // Keep the exact original markup so an editor rebuilding the markdown from
-      // segments round-trips wiki AND ![](url) embeds byte-identically. start/end
-      // let callers splice a resized embed back into the source string safely.
-      segments.push({ type: "img", target, markup: match[0], start: match.index, end: match.index + match[0].length });
-      last = match.index + match[0].length;
-    }
-    if (last < text.length) segments.push({ type: "md", text: text.slice(last) });
-    if (!segments.length) segments.push({ type: "md", text });
-    return segments;
+    return splitDetails(markdown);
   }
 
   /**
@@ -2187,7 +2386,7 @@ class CardModal extends Modal {
       const button = iconButton(icon, label, (event) => {
         event.preventDefault();
         event.stopPropagation();
-        onClick();
+        onClick(event);
       });
       button.classList.add("ot-details-tool");
       return keepEditorSelection(button);
@@ -2325,6 +2524,42 @@ class CardModal extends Modal {
         }
         syncBlockFromDom(t);
       }).open();
+    };
+
+    // Reference another card using a real Obsidian wikilink. Selected text
+    // becomes the link label; without a selection, the card title is inserted.
+    const insertCardReference = (event) => {
+      const t = focusedText();
+      if (!t) return;
+      const selection = window.getSelection();
+      const hasSelection = !!(selection && selection.rangeCount && !selection.isCollapsed && t.ce.contains(selection.anchorNode));
+      const selectedText = hasSelection ? selection.toString() : "";
+      const savedRange = hasSelection ? selection.getRangeAt(0).cloneRange() : null;
+      const choices = (this.plugin.data.boards || []).flatMap((board) => board.lists.flatMap((list) => list.cardIds
+        .map((id) => this.plugin.data.cards[id])
+        .filter((card) => card && card.id !== this.cardId)
+        .map((card) => ({ board, card, list }))));
+      if (!choices.length) {
+        new Notice("There are no other cards to reference.");
+        return;
+      }
+      const menu = new Menu();
+      choices.forEach(({ board, card, list }) => {
+        menu.addItem((item) => item
+          .setTitle(`${card.title} — ${list.title} (${board.name})`)
+          .setIcon("square-kanban")
+          .onClick(() => {
+            t.ce.focus();
+            if (savedRange) {
+              const restore = window.getSelection();
+              restore.removeAllRanges();
+              restore.addRange(savedRange);
+            }
+            document.execCommand("insertHTML", false, inlineMdToHtml(cardReferenceMarkup(card, selectedText)));
+            syncBlockFromDom(t);
+          }));
+      });
+      menu.showAtMouseEvent(event);
     };
 
     // The run of consecutive image blocks around `index` (empty text slots
@@ -2587,6 +2822,7 @@ class CardModal extends Modal {
         makeTool("ellipsis", "Quote", () => toggleBlockFormat("blockquote")),
         makeTool("list", "Bulleted list", () => execCmd("insertUnorderedList")),
         makeTool("link", "Link", insertLink),
+        makeTool("square-kanban", "Reference card", insertCardReference),
         makeTool("image", "Add image", () => imageInput.click()),
         makeTool("plus", "Divider", () => execCmd("insertHorizontalRule"))
       );
@@ -2891,12 +3127,8 @@ class CardModal extends Modal {
   // renders self-contained HTML in a hidden BrowserWindow and uses Electron's
   // printToPDF — no dependence on the current window or Obsidian's note export.
   async exportCardPdf() {
-    let remote = null;
-    try { remote = window.require && window.require("@electron/remote"); } catch (error) { remote = null; }
+    const remote = electronPdfRemote();
     if (!remote) {
-      try { remote = window.require && window.require("electron").remote; } catch (error) { remote = null; }
-    }
-    if (!remote || !remote.BrowserWindow || !remote.dialog) {
       new Notice("PDF export needs the Obsidian desktop app.");
       return;
     }
@@ -2905,122 +3137,8 @@ class CardModal extends Modal {
       const card = this.card;
       const board = this.plugin.findBoardForCard(card);
       const list = board && board.lists.find((item) => item.id === card.listId);
-      const esc = escapeDetailsHtml;
-
-      // Description: markdown via the shared converter; images inlined as data
-      // URLs so the hidden window needs no access to the vault's app:// protocol.
-      // Consecutive images form a RUN (whitespace between embeds doesn't break
-      // it) and print as a flex row with PERCENTAGE widths derived from the
-      // stored px sizes (relative to the ~800px modal they were sized in). Raw
-      // px would overflow the narrower A4 content box and wrap the grid into a
-      // single column — percentages keep 2-across as 2-across on any page.
-      const descriptionParts = [];
-      let imageRun = [];
-      const flushImageRun = () => {
-        if (!imageRun.length) return;
-        if (imageRun.length === 1) {
-          const only = imageRun[0];
-          const sizing = only.width ? ` style="width:${Math.min(only.width, 660)}px"` : "";
-          descriptionParts.push(`<img src="${only.src}"${sizing}>`);
-        } else {
-          const cells = imageRun.map((item) => {
-            const percent = Math.min(100, Math.max(12, Math.round(((item.width || 380) / 8) * 10) / 10));
-            return `<img src="${item.src}" style="width: calc(${percent}% - 8px)">`;
-          }).join("");
-          descriptionParts.push(`<div class="imgrow">${cells}</div>`);
-        }
-        imageRun = [];
-      };
-      for (const seg of this.splitDetailSegments(this.currentDetailsText())) {
-        if (seg.type === "img") {
-          const resolved = this.plugin.resolveCardImage(card, seg.target);
-          if (resolved && resolved.file) {
-            try {
-              const bin = await this.app.vault.readBinary(resolved.file);
-              const ext = (resolved.file.extension || "png").toLowerCase();
-              const mime = ext === "svg" ? "image/svg+xml" : (ext === "jpg" ? "image/jpeg" : `image/${ext}`);
-              imageRun.push({
-                src: `data:${mime};base64,${arrayBufferToBase64(bin)}`,
-                width: imageSizeFromMarkup(seg.markup),
-              });
-            } catch (error) {
-              // unreadable image — skip it rather than fail the export
-            }
-          }
-          continue;
-        }
-        if (!seg.text.trim()) continue; // whitespace gap — keep the image run going
-        flushImageRun();
-        descriptionParts.push(detailsMdToHtml(seg.text));
-      }
-      flushImageRun();
-
-      const labelsHtml = (this.localLabels || [])
-        .map((label) => `<span class="pill" style="background:${esc(label.color || "#2f6fd6")}">${esc(label.name)}</span>`)
-        .join("");
-      const membersText = (this.localAssignees || []).map((a) => a.name || a.email).filter(Boolean).join(", ");
-      const datesText = dateRangeLabel(card.startDate, card.dueDate) || "";
-      const checklistHtml = (this.localChecklist || [])
-        .map((item) => `<div class="chk"><span class="box">${item.done ? "☑" : "☐"}</span><span class="${item.done ? "done" : ""}">${esc(item.text || "")}</span>${item.assignee && (item.assignee.name || item.assignee.email) ? `<span class="who"> — ${esc(item.assignee.name || item.assignee.email)}</span>` : ""}</div>`)
-        .join("");
-      const metaBits = [
-        board ? esc(board.name) : "",
-        list ? esc(list.title) : "",
-        card.completed ? "Completed" : "",
-        datesText ? esc(datesText) : "",
-      ].filter(Boolean).join(" • ");
-
-      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(this.localTitle || "Card")}</title><style>
-        body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1f2328; margin: 42px; line-height: 1.5; }
-        h1 { font-size: 24px; margin: 0 0 6px; }
-        .meta { color: #667085; font-size: 13px; margin-bottom: 12px; }
-        .pill { display: inline-block; color: #fff; border-radius: 4px; padding: 2px 10px; font-size: 12px; font-weight: 700; margin: 0 6px 6px 0; }
-        .section { margin-top: 22px; }
-        .section h2 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
-        img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
-        .imgrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 10px 0; }
-        .imgrow img { margin: 0; }
-        .chk { margin: 4px 0; }
-        .box { margin-right: 7px; }
-        .done { text-decoration: line-through; color: #98a2b3; }
-        .who { color: #667085; font-size: 12px; }
-        blockquote { border-left: 3px solid #e5e7eb; margin: 8px 0; padding: 2px 12px; color: #667085; }
-        code { background: #f2f4f7; padding: 1px 5px; border-radius: 4px; }
-        ul, ol { padding-left: 22px; }
-        p { margin: 0 0 0.6em; }
-      </style></head><body>
-        <h1>${esc(this.localTitle || "Card")}</h1>
-        ${metaBits ? `<div class="meta">${metaBits}</div>` : ""}
-        ${labelsHtml ? `<div>${labelsHtml}</div>` : ""}
-        ${membersText ? `<div class="meta" style="margin-top:8px">Members: ${esc(membersText)}</div>` : ""}
-        ${descriptionParts.length ? `<div class="section"><h2>Description</h2>${descriptionParts.join("")}</div>` : ""}
-        ${checklistHtml ? `<div class="section"><h2>Checklist</h2>${checklistHtml}</div>` : ""}
-      </body></html>`;
-
-      const chosen = await remote.dialog.showSaveDialog({
-        defaultPath: `${String(this.localTitle || "card").replace(/[\\/:*?"<>|]/g, "-").trim() || "card"}.pdf`,
-        filters: [{ name: "PDF", extensions: ["pdf"] }],
-      });
-      if (!chosen || chosen.canceled || !chosen.filePath) return;
-
-      const fs = window.require("fs");
-      const os = window.require("os");
-      const pathMod = window.require("path");
-      const tmpPath = pathMod.join(os.tmpdir(), `task-deck-card-${Date.now()}.html`);
-      fs.writeFileSync(tmpPath, html, "utf8");
-      const win = new remote.BrowserWindow({ show: false, webPreferences: { sandbox: true } });
-      try {
-        await win.loadFile(tmpPath);
-        // Give layout a beat to settle (data-URI images decode synchronously,
-        // but pagination measures after first paint).
-        await new Promise((resolve) => setTimeout(resolve, 150));
-        const pdf = await win.webContents.printToPDF({ printBackground: true, pageSize: "A4" });
-        fs.writeFileSync(chosen.filePath, pdf);
-        new Notice("PDF saved.");
-      } finally {
-        win.destroy();
-        try { fs.unlinkSync(tmpPath); } catch (error) { /* temp cleanup is best-effort */ }
-      }
+      const body = await cardPdfArticle(this.app, this.plugin, card, board, list, 1);
+      if (await savePdf(remote, pdfDocument(card.title || "Card", body), card.title || "card")) new Notice("PDF saved.");
     } catch (error) {
       console.error(error);
       new Notice("Could not export the PDF.");
@@ -3346,7 +3464,7 @@ class CardModal extends Modal {
       title: textLine(this.localTitle) || this.card.title,
       labels: clone(this.localLabels),
       assignees: clone(this.localAssignees || []),
-      details: this.localDetails.trim(),
+      details: this.currentDetailsText().trim(),
       checklist: this.localChecklist
         .map((item) => ({
           done: !!item.done,
@@ -3391,6 +3509,38 @@ class CardModal extends Modal {
   }
 }
 
+/** Exports one board as a single PDF, preserving list and card order. */
+async function exportBoardPdf(app, plugin, board) {
+  const remote = electronPdfRemote();
+  if (!remote) {
+    new Notice("PDF export needs the Obsidian desktop app.");
+    return;
+  }
+  if (!board) return;
+
+  try {
+    new Notice("Preparing board PDF...");
+    const body = [`<h1>${escapeDetailsHtml(board.name || "Board")}</h1>`];
+    let cardCount = 0;
+    for (const list of board.lists || []) {
+      const cards = (list.cardIds || []).map((id) => plugin.data.cards[id]).filter(Boolean);
+      if (!cards.length) continue;
+      body.push(`<h2>${escapeDetailsHtml(list.title || "List")}</h2>`);
+      for (const card of cards) {
+        try { await plugin.hydrateCardFromFile(card); } catch (error) { console.error(error); }
+        body.push(await cardPdfArticle(app, plugin, card, board, list, 3, "board-card"));
+        cardCount += 1;
+      }
+    }
+    if (!cardCount) body.push('<p class="meta">This board has no cards.</p>');
+    const html = pdfDocument(board.name || "Board", body.join(""));
+    if (await savePdf(remote, html, board.name || "board")) new Notice("Board PDF saved.");
+  } catch (error) {
+    console.error(error);
+    new Notice("Could not export the board PDF.");
+  }
+}
+
 module.exports = {
   TextPromptModal,
   LabelPickerModal,
@@ -3398,6 +3548,7 @@ module.exports = {
   CardDatesModal,
   AboutModal,
   CardModal,
+  exportBoardPdf,
 };
 
   },
@@ -3411,7 +3562,9 @@ const {
   TASK_DECK_ICON,
   VIEW_TYPE,
   addButtonIcon,
+  cardReferenceMarkup,
   checklistStats,
+  copyTextToClipboard,
   createElement,
   dateRangeLabel,
   initials,
@@ -3420,7 +3573,7 @@ const {
   textButton,
   textLine,
 } = __require("src/helpers.js");
-const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal } = __require("src/modals.js");
+const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal, exportBoardPdf } = __require("src/modals.js");
 
 // Live board presence (SyncDeck cursors) tuning.
 // The transport stays plain HTTP polling; smoothness comes from client-side
@@ -3508,6 +3661,7 @@ class BoardView extends ItemView {
     actions.append(
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
+      textButton("download", "Export PDF", () => exportBoardPdf(this.app, this.plugin, board).catch(console.error)),
       textButton("plus", "Add list", () => this.plugin.addList())
     );
     toolbar.append(actions);
@@ -4847,6 +5001,19 @@ class BoardView extends ItemView {
     }
     menu.addItem((item) => {
       item
+        .setTitle("Copy card reference")
+        .setIcon("copy")
+        .onClick(async () => {
+          try {
+            await copyTextToClipboard(cardReferenceMarkup(card));
+            new Notice("Card reference copied");
+          } catch (error) {
+            new Notice("Could not copy the card reference.");
+          }
+        });
+    });
+    menu.addItem((item) => {
+      item
         .setTitle("Delete card")
         .setIcon("trash")
         .onClick(async () => {
@@ -4899,6 +5066,12 @@ class BoardView extends ItemView {
   showBoardMenu(event, board) {
     event.stopPropagation();
     const menu = new Menu();
+    menu.addItem((item) => {
+      item
+        .setTitle("Export board as PDF")
+        .setIcon("download")
+        .onClick(() => exportBoardPdf(this.app, this.plugin, board).catch(console.error));
+    });
     menu.addItem((item) => {
       item
         .setTitle("Rename board")
