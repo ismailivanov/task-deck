@@ -28,10 +28,13 @@ Module._load = originalLoad;
 
 (async () => {
   const updates = [];
+  let draftSaves = 0;
   const plugin = {
-    data: { cards: {}, labels: [] },
+    data: { cards: {}, labels: [], detailsDrafts: {} },
     editingCardId: "card-1",
     async updateCard(id, patch) { updates.push({ id, patch }); },
+    async saveData() { draftSaves += 1; },
+    async hydrateCardFromFile() {},
   };
   const modal = new CardModal({}, plugin, "card-1");
   modal.card = { id: "card-1", title: "Card", details: "old" };
@@ -39,12 +42,24 @@ Module._load = originalLoad;
   modal.localDetails = "old";
   modal.detailsDraft = "unsaved draft";
   modal.editingDetails = true;
+  assert.strictEqual(modal.cardPatch().details, "old");
 
   modal.onClose();
-  await modal.savePromise;
+  await modal.draftSavePromise;
 
-  assert.strictEqual(updates.length, 1);
-  assert.strictEqual(updates[0].patch.details, "unsaved draft");
+  assert.strictEqual(updates.length, 0);
+  assert.strictEqual(plugin.data.detailsDrafts["card-1"], "unsaved draft");
+  assert.strictEqual(draftSaves, 1);
+
+  plugin.data.cards["card-1"] = modal.card;
+  const resumed = new CardModal({}, plugin, "card-1");
+  resumed.setupCardLock = async () => {};
+  resumed.render = () => {};
+  await resumed.load();
+  assert.strictEqual(resumed.editingDetails, true);
+  assert.strictEqual(resumed.detailsDraft, "unsaved draft");
+  await resumed.clearDetailsDraft();
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(plugin.data.detailsDrafts, "card-1"), false);
   console.log("card-modal-close.test.js passed");
 })().catch((error) => {
   console.error(error);

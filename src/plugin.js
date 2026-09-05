@@ -210,6 +210,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.boards = Array.isArray(this.data.boards) ? this.data.boards : [];
     this.data.cards = this.data.cards || {};
     this.data.labels = this.data.labels || [];
+    this.data.detailsDrafts = this.data.detailsDrafts && typeof this.data.detailsDrafts === "object"
+      ? this.data.detailsDrafts
+      : {};
     this.data.completionSound = this.data.completionSound !== false;
     this.data.compactLabels = !!this.data.compactLabels;
     this.data.labels = this.normalizeGlobalLabels(this.data.labels);
@@ -1599,6 +1602,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
     if (file) await this.app.vault.trash(file, true);
     delete this.data.cards[cardId];
+    if (this.data.detailsDrafts) delete this.data.detailsDrafts[cardId];
 
     if (saveAndRefresh) {
       await this.savePluginData();

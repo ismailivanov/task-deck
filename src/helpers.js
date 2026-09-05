@@ -48,6 +48,7 @@ const DEFAULT_DATA = {
   boards: [],
   cards: {},
   labels: [],
+  detailsDrafts: {},
 };
 
 function clone(value) {

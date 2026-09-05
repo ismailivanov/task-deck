@@ -41,7 +41,7 @@ global.window = {
   },
 };
 
-const { exportBoardPdf } = require("../src/modals");
+const { exportListPdf } = require("../src/modals");
 Module._load = originalLoad;
 
 (async () => {
@@ -53,19 +53,28 @@ Module._load = originalLoad;
     details: "See [[Board/cards/Other|related task]].",
     checklist: [],
   };
-  const board = { id: "board-1", name: "Board", lists: [{ id: "list-1", title: "Todo", cardIds: [card.id] }] };
+  const hiddenCard = { id: "card-2", title: "Hidden card", listId: "list-2", details: "", checklist: [] };
+  const board = {
+    id: "board-1",
+    name: "Board",
+    lists: [
+      { id: "list-1", title: "Todo", cardIds: [card.id] },
+      { id: "list-2", title: "Done", cardIds: [hiddenCard.id] },
+    ],
+  };
   const plugin = {
-    data: { cards: { [card.id]: card } },
+    data: { cards: { [card.id]: card, [hiddenCard.id]: hiddenCard } },
     async hydrateCardFromFile() {},
     resolveCardImage() { return null; },
   };
 
-  await exportBoardPdf({}, plugin, board);
+  await exportListPdf({}, plugin, board, board.lists[0]);
 
-  assert.match(html, /<h1>Board<\/h1>/);
-  assert.match(html, /<h3>First card<\/h3>/);
+  assert.match(html, /<h1>Todo<\/h1>/);
+  assert.match(html, /<h2>First card<\/h2>/);
   assert.match(html, /class="task-card-ref"/);
   assert.match(html, />related task<\/a>/);
+  assert.doesNotMatch(html, /Hidden card/);
   console.log("pdf-export.test.js passed");
 })().catch((error) => {
   console.error(error);

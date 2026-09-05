@@ -51,6 +51,7 @@ const DEFAULT_DATA = {
   boards: [],
   cards: {},
   labels: [],
+  detailsDrafts: {},
 };
 
 function clone(value) {
@@ -1060,7 +1061,7 @@ function pdfDocument(title, body) {
     h3 { font-size: 18px; margin: 0 0 6px; break-after: avoid; } h4 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
     .meta { color: #667085; font-size: 13px; margin-bottom: 12px; } .members { margin-top: 8px; }
     .pill { display: inline-block; color: #fff; border-radius: 4px; padding: 2px 10px; font-size: 12px; font-weight: 700; margin: 0 6px 6px 0; }
-    .section { margin-top: 22px; } .board-card { border-top: 1px solid #d0d5dd; margin-top: 18px; padding-top: 18px; }
+    .section { margin-top: 22px; } .list-card { border-top: 1px solid #d0d5dd; margin-top: 18px; padding-top: 18px; }
     img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
     .imgrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 10px 0; } .imgrow img { margin: 0; }
     .chk { margin: 4px 0; } .box { margin-right: 7px; } .done { text-decoration: line-through; color: #98a2b3; } .who { color: #667085; font-size: 12px; }
@@ -1746,8 +1747,8 @@ class AboutModal extends Modal {
 /**
  * Full card editor.
  *
- * Card edits are persisted while the modal is open so closing the editor never
- * drops checklist, label, title, or details changes.
+ * Card fields autosave; unfinished description edits are kept as local drafts
+ * until the description's Save or Cancel action resolves them.
  */
 class CardModal extends Modal {
   constructor(app, plugin, cardId, options = {}) {
@@ -1768,6 +1769,8 @@ class CardModal extends Modal {
     this.addingChecklistItem = false;
     this.saveTimer = null;
     this.savePromise = Promise.resolve();
+    this.draftSaveTimer = null;
+    this.draftSavePromise = Promise.resolve();
     this.readOnly = false;
     this.lockHolder = null;
     this.lockAcquired = false;
@@ -1803,8 +1806,10 @@ class CardModal extends Modal {
     this.localGlobalLabels = clone(this.plugin.data.labels || []);
     this.localLabels.forEach((label) => this.ensureLocalGlobalLabel(label));
     this.localDetails = card.details || "";
-    this.detailsDraft = "";
-    this.editingDetails = false;
+    const drafts = this.plugin.data.detailsDrafts || {};
+    const hasDraft = Object.prototype.hasOwnProperty.call(drafts, card.id);
+    this.detailsDraft = hasDraft ? String(drafts[card.id] || "") : "";
+    this.editingDetails = hasDraft;
     this.localChecklist = clone(card.checklist || []);
     this.localAssignees = clone(card.assignees || []);
     await this.setupCardLock();
@@ -1856,6 +1861,7 @@ class CardModal extends Modal {
   // would conflict with the real editor's changes.
   enterReadOnly(holder) {
     if (this.readOnly) return;
+    if (this.editingDetails) this.persistDetailsDraft().catch(console.error);
     this.readOnly = true;
     this.lockHolder = holder || this.lockHolder;
     this.lockAcquired = false;
@@ -2083,15 +2089,56 @@ class CardModal extends Modal {
     });
   }
 
+  queueDetailsDraftSave() {
+    if (this.draftSaveTimer) window.clearTimeout(this.draftSaveTimer);
+    this.draftSaveTimer = window.setTimeout(() => {
+      this.draftSaveTimer = null;
+      this.persistDetailsDraft().catch(console.error);
+    }, 350);
+  }
+
+  async persistDetailsDraft() {
+    if (this.draftSaveTimer) {
+      window.clearTimeout(this.draftSaveTimer);
+      this.draftSaveTimer = null;
+    }
+    this.plugin.data.detailsDrafts = this.plugin.data.detailsDrafts || {};
+    const drafts = this.plugin.data.detailsDrafts;
+    const hasDraft = Object.prototype.hasOwnProperty.call(drafts, this.cardId);
+    const keepDraft = this.detailsDraft !== this.localDetails;
+    if ((keepDraft && hasDraft && drafts[this.cardId] === this.detailsDraft) || (!keepDraft && !hasDraft)) {
+      await this.draftSavePromise;
+      return;
+    }
+    if (keepDraft) drafts[this.cardId] = this.detailsDraft;
+    else delete drafts[this.cardId];
+    this.draftSavePromise = this.draftSavePromise
+      .then(() => this.plugin.saveData(this.plugin.data))
+      .catch((error) => {
+        console.error(error);
+        new Notice("Could not save description draft.");
+      });
+    await this.draftSavePromise;
+  }
+
+  async clearDetailsDraft() {
+    if (this.draftSaveTimer) {
+      window.clearTimeout(this.draftSaveTimer);
+      this.draftSaveTimer = null;
+    }
+    if (!this.plugin.data.detailsDrafts || !Object.prototype.hasOwnProperty.call(this.plugin.data.detailsDrafts, this.cardId)) return;
+    delete this.plugin.data.detailsDrafts[this.cardId];
+    this.draftSavePromise = this.draftSavePromise.then(() => this.plugin.saveData(this.plugin.data));
+    await this.draftSavePromise;
+  }
+
   onClose() {
     this.stopLockHeartbeat();
-    // The window's X is a commit too. In particular, the description editor
-    // keeps its live value in detailsDraft until its own Save button is used.
-    // Save before releasing the collaborative lock so that closing can never
-    // silently discard that draft or race another editor.
-    const needsSave = !this.readOnly && !this.closeSaveDone && (this.editingDetails || this.saveTimer);
-    const persist = needsSave ? this.saveNow() : this.savePromise;
-    persist.catch(console.error).finally(() => {
+    // Closing preserves an unfinished description locally as a draft. Other
+    // card fields still use their normal debounced card save.
+    const cardPersist = !this.readOnly && !this.closeSaveDone && this.saveTimer ? this.saveNow() : this.savePromise;
+    const draftPersist = this.editingDetails ? this.persistDetailsDraft() : this.draftSavePromise;
+    Promise.all([cardPersist, draftPersist]).catch(console.error).finally(() => {
       if (!this.readOnly && this.lockBoardId && this.plugin.releaseCardLock) {
         this.plugin.releaseCardLock(this.lockBoardId, this.cardId).catch(() => {});
       }
@@ -2359,16 +2406,22 @@ class CardModal extends Modal {
     };
 
     const saveDetails = async () => {
+      if (this.draftSaveTimer) {
+        window.clearTimeout(this.draftSaveTimer);
+        this.draftSaveTimer = null;
+      }
       this.localDetails = editor.value.trim();
       this.detailsDraft = "";
       this.editingDetails = false;
       await this.saveNow();
+      await this.clearDetailsDraft();
       this.render();
     };
 
     const cancelDetails = () => {
       this.detailsDraft = "";
       this.editingDetails = false;
+      this.clearDetailsDraft().catch(console.error);
       this.render();
     };
     this.showDetailsPreview = () => {
@@ -2449,8 +2502,11 @@ class CardModal extends Modal {
     };
 
     const syncDraft = () => {
-      this.detailsDraft = joinBlocks();
+      const next = joinBlocks();
+      const changed = next !== this.detailsDraft;
+      this.detailsDraft = next;
       editor.value = this.detailsDraft;
+      if (changed) this.queueDetailsDraftSave();
     };
 
     const placeCaret = (ce, atStart) => {
@@ -3239,10 +3295,10 @@ class CardModal extends Modal {
         if (created) await this.app.vault.trash(created, false).catch(() => {});
         return;
       }
-      if (this.editingDetails) this.localDetails = this.detailsDraft;
-      // Persist the binary and its embed together (not just the debounced save),
-      // so a crash right after can't leave an unreferenced attachment.
-      await this.saveNow();
+      // Persist the embed with the draft immediately, so a crash right after
+      // attaching does not lose the reference.
+      if (this.editingDetails) await this.persistDetailsDraft();
+      else await this.saveNow();
     } catch (error) {
       console.error(error);
       new Notice("Couldn't add the image.");
@@ -3464,7 +3520,7 @@ class CardModal extends Modal {
       title: textLine(this.localTitle) || this.card.title,
       labels: clone(this.localLabels),
       assignees: clone(this.localAssignees || []),
-      details: this.currentDetailsText().trim(),
+      details: this.localDetails.trim(),
       checklist: this.localChecklist
         .map((item) => ({
           done: !!item.done,
@@ -3509,35 +3565,33 @@ class CardModal extends Modal {
   }
 }
 
-/** Exports one board as a single PDF, preserving list and card order. */
-async function exportBoardPdf(app, plugin, board) {
+/** Exports one list as a single PDF, preserving its card order. */
+async function exportListPdf(app, plugin, board, list) {
   const remote = electronPdfRemote();
   if (!remote) {
     new Notice("PDF export needs the Obsidian desktop app.");
     return;
   }
-  if (!board) return;
+  if (!board || !list) return;
 
   try {
-    new Notice("Preparing board PDF...");
-    const body = [`<h1>${escapeDetailsHtml(board.name || "Board")}</h1>`];
-    let cardCount = 0;
-    for (const list of board.lists || []) {
-      const cards = (list.cardIds || []).map((id) => plugin.data.cards[id]).filter(Boolean);
-      if (!cards.length) continue;
-      body.push(`<h2>${escapeDetailsHtml(list.title || "List")}</h2>`);
-      for (const card of cards) {
-        try { await plugin.hydrateCardFromFile(card); } catch (error) { console.error(error); }
-        body.push(await cardPdfArticle(app, plugin, card, board, list, 3, "board-card"));
-        cardCount += 1;
-      }
+    new Notice("Preparing list PDF...");
+    const body = [
+      `<h1>${escapeDetailsHtml(list.title || "List")}</h1>`,
+      `<div class="meta">${escapeDetailsHtml(board.name || "Board")}</div>`,
+    ];
+    const cards = (list.cardIds || []).map((id) => plugin.data.cards[id]).filter(Boolean);
+    for (const card of cards) {
+      try { await plugin.hydrateCardFromFile(card); } catch (error) { console.error(error); }
+      body.push(await cardPdfArticle(app, plugin, card, board, list, 2, "list-card"));
     }
-    if (!cardCount) body.push('<p class="meta">This board has no cards.</p>');
-    const html = pdfDocument(board.name || "Board", body.join(""));
-    if (await savePdf(remote, html, board.name || "board")) new Notice("Board PDF saved.");
+    if (!cards.length) body.push('<p class="meta">This list has no cards.</p>');
+    const title = `${board.name || "Board"} - ${list.title || "List"}`;
+    const html = pdfDocument(title, body.join(""));
+    if (await savePdf(remote, html, title)) new Notice("List PDF saved.");
   } catch (error) {
     console.error(error);
-    new Notice("Could not export the board PDF.");
+    new Notice("Could not export the list PDF.");
   }
 }
 
@@ -3548,7 +3602,7 @@ module.exports = {
   CardDatesModal,
   AboutModal,
   CardModal,
-  exportBoardPdf,
+  exportListPdf,
 };
 
   },
@@ -3573,7 +3627,7 @@ const {
   textButton,
   textLine,
 } = __require("src/helpers.js");
-const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal, exportBoardPdf } = __require("src/modals.js");
+const { AboutModal, CardDatesModal, CardModal, LabelPickerModal, ListColorModal, exportListPdf } = __require("src/modals.js");
 
 // Live board presence (SyncDeck cursors) tuning.
 // The transport stays plain HTTP polling; smoothness comes from client-side
@@ -3661,7 +3715,6 @@ class BoardView extends ItemView {
     actions.append(
       textButton("info", "About", () => new AboutModal(this.app, this.plugin).open()),
       textButton("heart", "Support", () => window.open(DONATION_URL, "_blank")),
-      textButton("download", "Export PDF", () => exportBoardPdf(this.app, this.plugin, board).catch(console.error)),
       textButton("plus", "Add list", () => this.plugin.addList())
     );
     toolbar.append(actions);
@@ -5056,6 +5109,12 @@ class BoardView extends ItemView {
     }
     menu.addItem((item) => {
       item
+        .setTitle("Export list as PDF")
+        .setIcon("download")
+        .onClick(() => exportListPdf(this.app, this.plugin, board, list).catch(console.error));
+    });
+    menu.addItem((item) => {
+      item
         .setTitle("Delete list")
         .setIcon("trash")
         .onClick(() => this.plugin.deleteList(list.id));
@@ -5066,12 +5125,6 @@ class BoardView extends ItemView {
   showBoardMenu(event, board) {
     event.stopPropagation();
     const menu = new Menu();
-    menu.addItem((item) => {
-      item
-        .setTitle("Export board as PDF")
-        .setIcon("download")
-        .onClick(() => exportBoardPdf(this.app, this.plugin, board).catch(console.error));
-    });
     menu.addItem((item) => {
       item
         .setTitle("Rename board")
@@ -5410,6 +5463,9 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     this.data.boards = Array.isArray(this.data.boards) ? this.data.boards : [];
     this.data.cards = this.data.cards || {};
     this.data.labels = this.data.labels || [];
+    this.data.detailsDrafts = this.data.detailsDrafts && typeof this.data.detailsDrafts === "object"
+      ? this.data.detailsDrafts
+      : {};
     this.data.completionSound = this.data.completionSound !== false;
     this.data.compactLabels = !!this.data.compactLabels;
     this.data.labels = this.normalizeGlobalLabels(this.data.labels);
@@ -6799,6 +6855,7 @@ module.exports = class ObsidianTasksKanbanPlugin extends Plugin {
     const file = this.app.vault.getAbstractFileByPath(card.filePath);
     if (file) await this.app.vault.trash(file, true);
     delete this.data.cards[cardId];
+    if (this.data.detailsDrafts) delete this.data.detailsDrafts[cardId];
 
     if (saveAndRefresh) {
       await this.savePluginData();
